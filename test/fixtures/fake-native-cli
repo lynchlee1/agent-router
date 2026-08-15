@@ -1,0 +1,106 @@
+#!/usr/bin/env node
+
+// A deliberately small, local stand-in for a subscription-backed coding CLI.
+// It is used only by the broker contract tests and never contacts a provider.
+
+import { appendFile } from 'node:fs/promises';
+
+const argv = process.argv.slice(2);
+
+function option(name) {
+  const index = argv.lastIndexOf(name);
+  return index === -1 ? undefined : argv[index + 1];
+}
+
+function numberOption(name) {
+  const value = Number(option(name) ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+async function record(event) {
+  const logPath = option('--log');
+  if (!logPath) return;
+
+  const environment = Object.fromEntries(
+    [
+      'OPENAI_API_KEY',
+      'ANTHROPIC_API_KEY',
+      'GEMINI_API_KEY',
+      'CODEX_API_KEY',
+      'FUTURE_PROVIDER_API_KEY',
+      'CODEX_HOME',
+    ].map((name) => [name, process.env[name] ?? null]),
+  );
+
+  await appendFile(
+    logPath,
+    `${JSON.stringify({ pid: process.pid, ...event, environment })}\n`,
+  );
+}
+
+const mode = option('--mode') ?? 'complete';
+const label = option('--label') ?? 'fake-agent';
+const prompt = option('--prompt') ?? '';
+const cwd = option('--cwd') ?? '';
+const nativeSessionId = option('--session-id');
+const resumedSessionId = option('--resume');
+const probe = argv.includes('--probe');
+
+await record({
+  kind: probe ? 'probe' : resumedSessionId ? 'resume' : 'run',
+  label,
+  mode,
+  prompt,
+  cwd,
+  resume_session_id: resumedSessionId ?? null,
+  argv,
+});
+
+const delayMs = numberOption('--delay-ms');
+if (delayMs) {
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+if (mode === 'unavailable') {
+  process.stdout.write(
+    `${JSON.stringify({ status: 'unavailable', summary: `${label} unavailable` })}\n`,
+  );
+  process.exitCode = 1;
+} else if (mode === 'quota') {
+  process.stdout.write(
+    `${JSON.stringify({
+      status: 'quota_exhausted',
+      summary: `${label} subscription quota exhausted`,
+    })}\n`,
+  );
+  process.exitCode = 75;
+} else if (mode === 'authentication_failed') {
+  process.stdout.write(
+    `${JSON.stringify({
+      status: 'authentication_failed',
+      summary: `${label} login required`,
+    })}\n`,
+  );
+  process.exitCode = 1;
+} else if (mode === 'invalid') {
+  process.stdout.write(
+    `${JSON.stringify({ status: 'invalid_request', summary: `${label} rejected request` })}\n`,
+  );
+  process.exitCode = 2;
+} else if (probe) {
+  process.stdout.write(
+    `${JSON.stringify({ status: 'available', summary: 'available' })}\n`,
+  );
+} else if (mode === 'plaintext') {
+  process.stdout.write(`${label} plain-text report: ${prompt}\n`);
+} else {
+  const sessionId = resumedSessionId ?? nativeSessionId;
+  process.stdout.write(
+    `${JSON.stringify({
+      ...(sessionId ? { session_id: sessionId } : {}),
+      summary: resumedSessionId
+        ? `${label} continued: ${prompt}`
+        : `${label} completed: ${prompt}`,
+    })}\n`,
+  );
+}

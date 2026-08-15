@@ -1,0 +1,7 @@
+node_modules/
+.agent-broker/
+**/.agent-broker/
+config/agents.local.json
+.claude/
+.codex/
+.grok/

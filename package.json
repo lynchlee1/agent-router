@@ -1,0 +1,23 @@
+{
+  "name": "agent-broker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A small subscription-first MCP broker for local coding CLIs.",
+  "type": "module",
+  "bin": {
+    "agent-broker": "./bin/agent-broker.js"
+  },
+  "scripts": {
+    "start": "node bin/agent-broker.js",
+    "connect": "node skills/lead-agent-work/scripts/connect-worker.mjs",
+    "test": "node --test",
+    "check": "node --check bin/agent-broker.js && node --check src/index.js && node --check src/server.js && node --check skills/lead-agent-work/scripts/connect-worker.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.0"
+  }
+}

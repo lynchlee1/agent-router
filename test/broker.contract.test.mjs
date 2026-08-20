@@ -284,6 +284,28 @@ contractTest('delegate injects the route model for a difficulty', async (t) => {
   assert.equal(run.argv[run.argv.indexOf('--model') + 1], 'strong');
 });
 
+contractTest('delegate uses a default model when no route matches', async (t) => {
+  const sandbox = await makeSandbox(t);
+  const broker = new AgentBroker(
+    configFor(sandbox, [
+      {
+        ...fakeAgent({ id: 'default-model', logPath: sandbox.logPath }),
+        model: 'default',
+        routes: [{ difficulty: 'low', model: 'fast' }],
+      },
+    ]),
+  );
+
+  const result = await broker.delegate({
+    task: 'hard work',
+    cwd: sandbox.directory,
+    difficulty: 'high',
+  });
+  assert.equal(result.status, 'completed');
+  const run = (await events(sandbox.logPath)).find((event) => event.kind === 'run');
+  assert.equal(run.argv[run.argv.indexOf('--model') + 1], 'default');
+});
+
 contractTest('delegate with difficulty only uses matching workers', async (t) => {
   const sandbox = await makeSandbox(t);
   const broker = new AgentBroker(

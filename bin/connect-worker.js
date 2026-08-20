@@ -7,9 +7,9 @@ import readline from 'node:readline';
 import tty from 'node:tty';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { AgentBroker, applyDifficulty, DIFFICULTIES, routesFrom, upsertRoute } from '../../../src/index.js';
+import { AgentBroker, applyDifficulty, DIFFICULTIES, routesFrom, upsertRoute } from '../src/index.js';
 
-const repoRootFromScript = resolve(fileURLToPath(new URL('../../../', import.meta.url)));
+const repoRootFromScript = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const SUBSCRIPTION_BILLING = { mode: 'subscription', fallback: 'forbidden' };
 const VERSION_PROBE = { args: ['--version'] };
 const NATIVE_PROMPT_ARGS = ['-p', '{{prompt}}'];
@@ -333,7 +333,8 @@ export function agentFromTemplate(template, { command, model, models, routes }) 
     ...agent,
     enabled: true,
     command,
-    args: pinModel(usableArgs(agent.args), undefined),
+    args: pinModel(usableArgs(agent.args), model),
+    ...(model ? { model } : {}),
     models: nextModels,
     routes: nextRoutes,
   };
@@ -382,7 +383,7 @@ export async function listModelsFor(command) {
 }
 
 async function importBrokerInternals() {
-  const module = await import('../../../src/index.js');
+  const module = await import('../src/index.js');
   return module.internals;
 }
 
@@ -487,10 +488,10 @@ export async function connectWorker(options) {
 function usage() {
   return `Usage:
   npm run connect                  # fullscreen TUI; loops until q
-  node connect-worker.mjs --cli <command>
-  node connect-worker.mjs --cli <command> --model <id>
-  node connect-worker.mjs --list-clis
-  node connect-worker.mjs --list-models --cli <id>
+  node bin/connect-worker.js --cli <command>
+  node bin/connect-worker.js --cli <command> --model <id>
+  node bin/connect-worker.js --list-clis
+  node bin/connect-worker.js --list-models --cli <id>
 `;
 }
 

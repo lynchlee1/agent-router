@@ -93,11 +93,14 @@ export function upsertRoute(routes, { difficulty, model, clear = false } = {}) {
 }
 
 export function modelForDifficulty(agent, difficulty) {
-  if (!difficulty) return undefined;
-  return routesFrom(agent).find((route) => route.difficulty === difficulty)?.model;
+  const routed = difficulty
+    ? routesFrom(agent).find((route) => route.difficulty === difficulty)?.model
+    : undefined;
+  return routed ?? agent.model ?? modelFromArgs(agent.args);
 }
 
 function agentHandlesDifficulty(agent, difficulty) {
+  if (agent.model || modelFromArgs(agent.args)) return true;
   const routes = routesFrom(agent);
   if (routes.length) return routes.some((route) => route.difficulty === difficulty);
   return (agent.difficulty ?? 'medium') === difficulty;

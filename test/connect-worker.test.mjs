@@ -9,10 +9,8 @@ const testDirectory = dirname(fileURLToPath(import.meta.url));
 const scriptPath = join(
   testDirectory,
   '..',
-  'skills',
-  'lead-agent-work',
-  'scripts',
-  'connect-worker.mjs',
+  'bin',
+  'connect-worker.js',
 );
 const connect = await import(pathToFileURL(scriptPath).href);
 
@@ -197,6 +195,8 @@ test('agentFromTemplate does not persist catalog-only fields', () => {
   assert.equal(agent.resolvedCommand, undefined);
   assert.equal(agent.installed, undefined);
   assert.equal(agent.currentModel, undefined);
+  assert.equal(agent.model, 'model-a');
+  assert.deepEqual(agent.args, ['-p', '{{prompt}}', '--model', 'model-a']);
 });
 
 async function makeConnectSandbox(t) {
@@ -237,6 +237,7 @@ test('connectWorker writes a CLI without pinning a model', async (t) => {
   assert.equal(result.model, null);
   const saved = JSON.parse(await readFile(configPath, 'utf8'));
   assert.deepEqual(saved.agents[0].args, ['-p', '{{prompt}}']);
+  assert.equal(saved.agents[0].model, undefined);
   assert.deepEqual(saved.agents[0].models, ['model-a']);
 });
 
@@ -270,6 +271,7 @@ test('connectWorker writes the selected model into local config without a ping',
   const saved = JSON.parse(await readFile(configPath, 'utf8'));
   assert.equal(saved.agents[0].enabled, true);
   assert.equal(saved.agents[0].command, command);
-  assert.deepEqual(saved.agents[0].args, ['-p', '{{prompt}}']);
+  assert.deepEqual(saved.agents[0].args, ['-p', '{{prompt}}', '--model', 'model-a']);
+  assert.equal(saved.agents[0].model, 'model-a');
   assert.deepEqual(saved.agents[0].models, ['model-a']);
 });

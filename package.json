@@ -10,8 +10,9 @@
   "scripts": {
     "start": "node bin/agent-broker.js",
     "connect": "node bin/connect-worker.js",
+    "register": "node bin/register.js",
     "test": "node --test",
-    "check": "node --check bin/agent-broker.js && node --check bin/connect-worker.js && node --check src/index.js && node --check src/server.js && node --check src/task-difficulty.js"
+    "check": "node --check bin/agent-broker.js && node --check bin/connect-worker.js && node --check bin/register.js && node --check src/index.js && node --check src/server.js && node --check src/task-difficulty.js"
   },
   "engines": {
     "node": ">=20"

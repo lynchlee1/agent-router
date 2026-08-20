@@ -51,6 +51,20 @@ test('parseSlashCommand maps /add and /delete', () => {
   assert.equal(connect.parseSlashCommand('add model-a'), undefined);
 });
 
+test('recallCommand moves through history and restores the current draft', () => {
+  const history = ['/add codex model-a high', '/delete codex model-a high'];
+  const latest = connect.recallCommand(history, history.length, '/add ', 'up');
+  assert.deepEqual(latest, { index: 1, query: '/delete codex model-a high' });
+  assert.deepEqual(
+    connect.recallCommand(history, latest.index, '/add ', 'up'),
+    { index: 0, query: '/add codex model-a high' },
+  );
+  assert.deepEqual(
+    connect.recallCommand(history, latest.index, '/add ', 'down'),
+    { index: 2, query: '/add ' },
+  );
+});
+
 test('parseWorkerRouteInput requires service, model, and effort', () => {
   assert.deepEqual(connect.parseWorkerRouteInput('codex gpt-5.6-sol high'), {
     service: 'codex',
@@ -184,6 +198,11 @@ test('genericWorker uses the codex-exec adapter for Codex', () => {
   const worker = connect.genericWorker('codex', '/opt/local/bin/codex');
   assert.equal(worker.adapter, 'codex-exec');
   assert.equal(worker.args, undefined);
+});
+
+test('genericWorker adds the delegated cwd to agy workspaces', () => {
+  const worker = connect.genericWorker('agy', '/opt/local/bin/agy');
+  assert.deepEqual(worker.args, ['-p', '{{prompt}}', '--add-dir', '{{cwd}}']);
 });
 
 test('resolveWorker reuses a local alias when the command already exists', () => {

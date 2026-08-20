@@ -170,6 +170,40 @@ contractTest('conciseReason prefers response and text over raw stdout JSON', () 
   assert.equal(internals.conciseReason(fromText, { stdout: '{"text":"pong"}' }, 'completed'), 'pong');
 });
 
+contractTest('Codex JSONL agent messages outrank nonfatal stderr warnings', () => {
+  const stdout = [
+    JSON.stringify({ type: 'thread.started', thread_id: 'thread-1' }),
+    JSON.stringify({
+      type: 'item.completed',
+      item: { type: 'agent_message', text: 'repository review complete' },
+    }),
+    JSON.stringify({ type: 'turn.completed', usage: { output_tokens: 4 } }),
+  ].join('\n');
+  const parsed = internals.parseOutput(stdout);
+
+  assert.equal(parsed.native_session_id, 'thread-1');
+  assert.equal(
+    internals.conciseReason(
+      parsed,
+      { stdout, stderr: 'failed to load models cache: stale schema' },
+      'completed',
+    ),
+    'repository review complete',
+  );
+});
+
+contractTest('completed plain-text stdout outranks nonfatal stderr warnings', () => {
+  const parsed = internals.parseOutput('plain-text result');
+  assert.equal(
+    internals.conciseReason(
+      parsed,
+      { stdout: 'plain-text result', stderr: 'nonfatal warning' },
+      'completed',
+    ),
+    'plain-text result',
+  );
+});
+
 contractTest('loadConfig accepts only subscription agents with forbidden fallback', async (t) => {
   const sandbox = await makeSandbox(t);
   const validConfigPath = join(sandbox.directory, 'valid.json');

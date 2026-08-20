@@ -111,6 +111,19 @@ export function parseWorkerRouteInput(argument) {
   return service && model && effort ? { service, model, effort } : undefined;
 }
 
+export function recallCommand(history, index, draft, direction) {
+  if (!history.length) return { index: 0, query: draft };
+  if (direction === 'up') {
+    const nextIndex = Math.max(0, index - 1);
+    return { index: nextIndex, query: history[nextIndex] };
+  }
+  const nextIndex = Math.min(history.length, index + 1);
+  return {
+    index: nextIndex,
+    query: nextIndex === history.length ? draft : history[nextIndex],
+  };
+}
+
 export function applyModelList(models = [], { add } = {}) {
   const next = [];
   for (const id of models) {
@@ -240,7 +253,7 @@ function decorateAgent(agent, resolvedCommand) {
     delete next.args;
     delete next.resume_args;
   } else {
-    next.args = usableArgs(agent.args);
+    next.args = usableArgs(agent.args, resolvedCommand);
   }
   return next;
 }
@@ -270,11 +283,14 @@ function matchesToken(agent, needle, token) {
     || (agent.resolvedCommand && (agent.resolvedCommand.endsWith(`/${token}`) || basename(agent.resolvedCommand) === token));
 }
 
-export function usableArgs(args) {
-  if (!Array.isArray(args) || !args.includes('{{prompt}}')) {
-    return [...NATIVE_PROMPT_ARGS];
+export function usableArgs(args, command) {
+  const next = !Array.isArray(args) || !args.includes('{{prompt}}')
+    ? [...NATIVE_PROMPT_ARGS]
+    : [...args];
+  if (basename(command ?? '') === 'agy' && !next.includes('--add-dir')) {
+    next.push('--add-dir', '{{cwd}}');
   }
-  return args;
+  return next;
 }
 
 export function genericWorker(id, command) {
@@ -284,7 +300,7 @@ export function genericWorker(id, command) {
     label: id,
     adapter: codex ? 'codex-exec' : 'native-cli',
     command,
-    ...(codex ? {} : { args: [...NATIVE_PROMPT_ARGS] }),
+    ...(codex ? {} : { args: usableArgs(undefined, command) }),
     probe: { args: [...VERSION_PROBE.args] },
     billing: { ...SUBSCRIPTION_BILLING },
   };
@@ -332,7 +348,7 @@ export function agentFromTemplate(template, { command, model, models, routes }) 
     command,
     ...(agent.adapter === 'codex-exec'
       ? {}
-      : { args: pinModel(usableArgs(templateArgs), model) }),
+      : { args: pinModel(usableArgs(templateArgs, command), model) }),
     ...(model ? { model } : {}),
     models: nextModels,
     routes: nextRoutes,
@@ -788,6 +804,9 @@ async function pickFromList(screen, view) {
     let selected = Math.max(0, view.initialSelected ?? 0);
     let completionSelected = 0;
     let query = '';
+    const commandHistory = view.commandHistory ?? [];
+    let historyIndex = commandHistory.length;
+    let historyDraft = '';
     const visible = () => {
       if (query.startsWith('/')) return view.rows;
       return view.allowInput ? filterRows(view.rows, query) : view.rows;
@@ -816,6 +835,7 @@ async function pickFromList(screen, view) {
       const item = menu[completionSelected];
       if (!item) return false;
       query = item.insert;
+      historyIndex = commandHistory.length;
       completionSelected = 0;
       if (submit && item.complete) return 'submit';
       draw();
@@ -838,6 +858,8 @@ async function pickFromList(screen, view) {
       if (key === 'esc') {
         if (view.allowInput && query) {
           query = '';
+          historyIndex = commandHistory.length;
+          historyDraft = '';
           selected = 0;
           draw();
           return;
@@ -848,6 +870,7 @@ async function pickFromList(screen, view) {
       }
       if (view.allowInput && key === 'backspace') {
         query = query.slice(0, -1);
+        historyIndex = commandHistory.length;
         selected = 0;
         completionSelected = 0;
         draw();
@@ -855,6 +878,8 @@ async function pickFromList(screen, view) {
       }
       if (view.allowInput && key === 'ctrl-u') {
         query = '';
+        historyIndex = commandHistory.length;
+        historyDraft = '';
         selected = 0;
         completionSelected = 0;
         draw();
@@ -879,6 +904,7 @@ async function pickFromList(screen, view) {
             draw();
             return;
           }
+          if (commandHistory.at(-1) !== typed) commandHistory.push(typed);
           off();
           resolve({ slash, selected: rows[selected] });
           return;
@@ -899,7 +925,18 @@ async function pickFromList(screen, view) {
         }
         return;
       }
-      if (key === 'up') {
+      const browsingHistory = historyIndex < commandHistory.length;
+      const moveThroughHistory = browsingHistory
+        ? key === 'up' || key === 'down'
+        : !menu.length && key === 'up';
+      if (view.allowInput && commandHistory.length && moveThroughHistory) {
+        if (!browsingHistory) historyDraft = query;
+        const recalled = recallCommand(commandHistory, historyIndex, historyDraft, key);
+        historyIndex = recalled.index;
+        query = recalled.query;
+        selected = 0;
+        completionSelected = 0;
+      } else if (key === 'up') {
         if (menu.length) completionSelected = (completionSelected + menu.length - 1) % menu.length;
         else selected = rows.length ? (selected + rows.length - 1) % rows.length : 0;
       } else if (key === 'down') {
@@ -911,6 +948,7 @@ async function pickFromList(screen, view) {
       else if (key === 'pagedown') selected = Math.min(Math.max(0, rows.length - 1), selected + 10);
       else if (view.allowInput && key.length >= 1 && !['up', 'down', 'home', 'end', 'pageup', 'pagedown', 'resize', 'tab'].includes(key)) {
         query += key;
+        historyIndex = commandHistory.length;
         if (query.startsWith('/')) completionSelected = 0;
         else selected = 0;
       } else if (!view.allowInput && (key === 'k' || key === 'j' || key === 'g' || key === 'G' || key === 'q')) {
@@ -1041,12 +1079,14 @@ function printOneShot(result) {
 async function runInteractiveLoop(baseOptions) {
   const screen = createScreen();
   screen.enter();
+  const commandHistory = [];
   let boxText = 'Use /add <service> <model> <effort> to assign a route.';
   let boxTone = 'accent';
   try {
     for (;;) {
       const { catalog } = await connectWorker({ ...baseOptions, listClis: true, verify: false });
       const rows = modelRows(catalog);
+      const empty = rows.length === 0;
       const worker = await pickFromList(screen, {
         title: 'agent-broker · Connect',
         meta: `${catalog.length} worker${catalog.length === 1 ? '' : 's'}`,
@@ -1055,8 +1095,13 @@ async function runInteractiveLoop(baseOptions) {
         boxText,
         boxTone,
         allowInput: true,
-        placeholder: '/add <service> <model> <effort>  ·  /delete <service> <model> <effort>',
-        footer: '↑/↓  ·  Enter actions  ·  Tab complete  ·  /add  ·  /delete  ·  Esc quit',
+        commandHistory,
+        placeholder: empty
+          ? '/add <service> <model> <effort>'
+          : '/add <service> <model> <effort>  ·  /delete <service> <model> <effort>',
+        footer: empty
+          ? '↑/↓ history  ·  Tab complete  ·  /add  ·  Esc quit'
+          : '↑/↓ navigate/history  ·  Enter actions  ·  Tab complete  ·  /add  ·  /delete  ·  Esc quit',
         usageAdd: 'Use /add <service> <model> <effort>',
         slash: {
           commands: [
@@ -1065,7 +1110,7 @@ async function runInteractiveLoop(baseOptions) {
               hint: '<service> <model> <effort>',
               complete: (insert) => Boolean(parseWorkerRouteInput(parseSlashCommand(insert)?.argument)),
             },
-            {
+            ...(empty ? [] : [{
               name: 'delete',
               hint: '<service> <model> <effort>',
               complete: (insert) => Boolean(parseWorkerRouteInput(parseSlashCommand(insert)?.argument)),
@@ -1079,7 +1124,7 @@ async function runInteractiveLoop(baseOptions) {
                   .filter((route) => route.model === model && route.effort)
                   .map((route) => route.effort))];
               },
-            },
+            }]),
           ],
         },
       });

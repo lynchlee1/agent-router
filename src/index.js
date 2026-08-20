@@ -744,6 +744,7 @@ function runProcess({ command, args, cwd, env, timeoutMs }) {
 function parseOutput(stdout = '') {
   let lastPayload;
   let nativeSessionId;
+  let summary;
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
@@ -751,11 +752,24 @@ function parseOutput(stdout = '') {
       if (!payload || typeof payload !== 'object') continue;
       lastPayload = payload;
       nativeSessionId ??= nativeSessionIdFrom(payload);
+      summary = summaryFromPayload(payload) ?? summary;
     } catch {
       // Native CLIs are allowed to return plain text; the bounded text becomes the summary.
     }
   }
-  return { payload: lastPayload, native_session_id: nativeSessionId };
+  return { payload: lastPayload, native_session_id: nativeSessionId, summary };
+}
+
+function summaryFromPayload(payload) {
+  const direct = [payload.summary, payload.message, payload.response, payload.text]
+    .find((value) => typeof value === 'string' && value.trim());
+  if (direct) return direct;
+  if (payload.type === 'item.completed' && payload.item?.type === 'agent_message') {
+    return typeof payload.item.text === 'string' && payload.item.text.trim()
+      ? payload.item.text
+      : undefined;
+  }
+  return undefined;
 }
 
 function nativeSessionIdFrom(payload) {
@@ -791,12 +805,14 @@ function classifyOutcome(outcome, parsed) {
 
 function conciseReason(parsed, outcome, status) {
   const candidates = [
+    parsed.summary,
     parsed.payload?.summary,
     parsed.payload?.message,
     parsed.payload?.response,
     parsed.payload?.text,
-    outcome.stderr,
-    outcome.stdout,
+    ...(status === 'completed'
+      ? [outcome.stdout, outcome.stderr]
+      : [outcome.stderr, outcome.stdout]),
     outcome.error?.message,
   ];
   const candidate = candidates.find((value) => typeof value === 'string' && value.trim());

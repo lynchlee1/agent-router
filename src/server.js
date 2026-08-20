@@ -21,12 +21,12 @@ export function createServer(broker) {
     'delegate',
     {
       title: 'Delegate bounded coding work',
-      description: 'Run a task through an ordered set of subscription-backed native CLI agents.',
+      description: 'Run a task through subscription-backed native CLI agents, optionally routed by task difficulty.',
       inputSchema: {
         task: z.string().min(1),
         cwd: z.string().min(1).optional(),
         role: z.string().min(1).optional(),
-        difficulty: z.enum(['low', 'medium', 'high']).optional(),
+        difficulty: z.enum(['easy_task', 'standard_task', 'hard_task']).optional(),
         agent_ids: z.array(z.string().min(1)).min(1).optional(),
         retry_safe: z.boolean().optional(),
         timeout_ms: z.number().int().positive().max(3_600_000).optional(),

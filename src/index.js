@@ -15,21 +15,30 @@ const TEMPLATE_VALUES = new Set(['{{prompt}}', '{{session_id}}', '{{cwd}}']);
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const PROBE_TIMEOUT_MS = 5 * 1000;
 const MAX_CAPTURE_BYTES = 1024 * 1024;
+const BROKER_DEPTH_NAME = 'AGENT_BROKER_DEPTH';
+
+export const DIFFICULTY_KEYS = Object.freeze(['easy_task', 'standard_task', 'hard_task']);
+
+export const DIFFICULTY_LABELS = Object.freeze({
+  easy_task: 'Easy task',
+  standard_task: 'Standard task',
+  hard_task: 'Hard task',
+});
 
 export const DIFFICULTIES = {
-  low: {
+  easy_task: {
     scarcity: 'abundant',
     priority: 30,
     max_concurrency: 2,
     roles: ['explore', 'implement', 'test'],
   },
-  medium: {
+  standard_task: {
     scarcity: 'normal',
     priority: 20,
     max_concurrency: 2,
     roles: ['explore', 'implement', 'test', 'debug'],
   },
-  high: {
+  hard_task: {
     scarcity: 'scarce',
     priority: 10,
     max_concurrency: 1,
@@ -38,9 +47,9 @@ export const DIFFICULTIES = {
 };
 
 export function normalizeDifficulty(value) {
-  if (value === undefined || value === '') return 'medium';
+  if (value === undefined || value === '') return 'standard_task';
   if (!Object.hasOwn(DIFFICULTIES, value)) {
-    throw new TypeError('difficulty must be low, medium, or high.');
+    throw new TypeError(`difficulty must be one of: ${DIFFICULTY_KEYS.join(', ')}.`);
   }
   return value;
 }
@@ -52,9 +61,9 @@ export function applyDifficulty(agent, difficulty) {
 
 function difficultyFrom(rawAgent) {
   if (rawAgent.difficulty) return normalizeDifficulty(rawAgent.difficulty);
-  if (rawAgent.scarcity === 'abundant') return 'low';
-  if (rawAgent.scarcity === 'scarce') return 'high';
-  return 'medium';
+  if (rawAgent.scarcity === 'abundant') return 'easy_task';
+  if (rawAgent.scarcity === 'scarce') return 'hard_task';
+  return 'standard_task';
 }
 
 function modelFromArgs(args = []) {
@@ -69,9 +78,15 @@ function normalizeRouteList(routes) {
     if (!route || typeof route !== 'object' || Array.isArray(route)) continue;
     if (!Object.hasOwn(DIFFICULTIES, route.difficulty)) continue;
     if (typeof route.model !== 'string' || !route.model.trim()) continue;
-    byDifficulty.set(route.difficulty, { difficulty: route.difficulty, model: route.model.trim() });
+    byDifficulty.set(route.difficulty, {
+      difficulty: route.difficulty,
+      model: route.model.trim(),
+      ...(typeof route.effort === 'string' && route.effort.trim()
+        ? { effort: route.effort.trim() }
+        : {}),
+    });
   }
-  return ['low', 'medium', 'high'].map((difficulty) => byDifficulty.get(difficulty)).filter(Boolean);
+  return DIFFICULTY_KEYS.map((difficulty) => byDifficulty.get(difficulty)).filter(Boolean);
 }
 
 export function routesFrom(agent) {
@@ -79,17 +94,21 @@ export function routesFrom(agent) {
   if (explicit.length) return explicit;
   const model = typeof agent.model === 'string' && agent.model ? agent.model : modelFromArgs(agent.args);
   if (!model) return [];
-  return [{ difficulty: agent.difficulty ?? 'medium', model }];
+  return [{ difficulty: agent.difficulty ?? 'standard_task', model }];
 }
 
-export function upsertRoute(routes, { difficulty, model, clear = false } = {}) {
+export function upsertRoute(routes, { difficulty, model, effort, clear = false } = {}) {
   const key = normalizeDifficulty(difficulty);
   const byDifficulty = new Map(normalizeRouteList(routes).map((route) => [route.difficulty, route]));
   if (clear) byDifficulty.delete(key);
   else if (typeof model === 'string' && model.trim()) {
-    byDifficulty.set(key, { difficulty: key, model: model.trim() });
+    byDifficulty.set(key, {
+      difficulty: key,
+      model: model.trim(),
+      ...(typeof effort === 'string' && effort.trim() ? { effort: effort.trim() } : {}),
+    });
   }
-  return ['low', 'medium', 'high'].map((item) => byDifficulty.get(item)).filter(Boolean);
+  return DIFFICULTY_KEYS.map((item) => byDifficulty.get(item)).filter(Boolean);
 }
 
 export function modelForDifficulty(agent, difficulty) {
@@ -99,11 +118,17 @@ export function modelForDifficulty(agent, difficulty) {
   return routed ?? agent.model ?? modelFromArgs(agent.args);
 }
 
+export function effortForDifficulty(agent, difficulty) {
+  return difficulty
+    ? routesFrom(agent).find((route) => route.difficulty === difficulty)?.effort
+    : undefined;
+}
+
 function agentHandlesDifficulty(agent, difficulty) {
   if (agent.model || modelFromArgs(agent.args)) return true;
   const routes = routesFrom(agent);
   if (routes.length) return routes.some((route) => route.difficulty === difficulty);
-  return (agent.difficulty ?? 'medium') === difficulty;
+  return (agent.difficulty ?? 'standard_task') === difficulty;
 }
 
 function withModelFlag(args, model) {
@@ -317,6 +342,7 @@ function resolvePath(base, target) {
 export class AgentBroker {
   constructor(config) {
     this.config = loadConfig(config);
+    this.delegationDepth = delegationDepth(process.env);
     this.active = new Map();
     this.availability = new Map();
     this.adapters = new Map();
@@ -354,6 +380,9 @@ export class AgentBroker {
 
   async delegate(input = {}) {
     const task = validateTask(input.task);
+    if (this.delegationDepth > 0) {
+      return failure('policy_rejected', 'Recursive delegation from a broker worker is disabled.');
+    }
     const candidates = this.#selectCandidates(input);
     if (!candidates.length) {
       return failure('no_eligible_agent', 'No enabled subscription agent matches this delegation.');
@@ -379,6 +408,7 @@ export class AgentBroker {
         kind: 'delegate',
         difficulty,
         model: modelForDifficulty(agent, difficulty),
+        effort: effortForDifficulty(agent, difficulty),
       });
       lastResult = result;
 
@@ -423,6 +453,7 @@ export class AgentBroker {
       native_session_id: saved.native_session_id,
       timeout_ms: normalizeTimeout(input.timeout_ms, agent.timeout_ms ?? this.config.timeout_ms),
       kind: 'continue',
+      effort: saved.effort,
     });
     if (result.status === 'completed') {
       const nativeSessionId = result.native_session_id ?? saved.native_session_id;
@@ -542,6 +573,7 @@ export class AgentBroker {
           adapter_identity: adapterIdentity(agent),
           native_session_id: nativeSessionId,
           cwd: request.cwd,
+          effort: request.effort,
           created_at: startedAt,
           updated_at: new Date().toISOString(),
         };
@@ -650,10 +682,11 @@ const codexExecAdapter = {
   async invoke(request) {
     const { agent, task, cwd, native_session_id: nativeSessionId, timeout_ms: timeoutMs, kind } = request;
     const args = kind === 'continue'
-      ? ['exec', 'resume', nativeSessionId, '--json']
-      : ['exec', '--json', '--cd', cwd];
+      ? ['exec', '--ignore-user-config', 'resume', nativeSessionId, '--json']
+      : ['exec', '--ignore-user-config', '--json', '--cd', cwd];
     const model = request.model ?? agent.model;
     if (model) args.push('--model', model);
+    if (request.effort) args.push('--config', `model_reasoning_effort="${request.effort}"`);
     if (kind === 'delegate' && agent.sandbox) args.push('--sandbox', agent.sandbox);
     args.push('--', task);
     return runProcess({
@@ -680,7 +713,13 @@ function childEnvironment(agent) {
   for (const name of Object.keys(environment)) {
     if (API_KEY_NAME.test(name)) delete environment[name];
   }
+  environment[BROKER_DEPTH_NAME] = String(delegationDepth(process.env) + 1);
   return environment;
+}
+
+function delegationDepth(environment) {
+  const value = Number.parseInt(environment[BROKER_DEPTH_NAME] ?? '0', 10);
+  return Number.isInteger(value) && value > 0 ? value : 0;
 }
 
 function runProcess({ command, args, cwd, env, timeoutMs }) {

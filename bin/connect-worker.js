@@ -7,17 +7,30 @@ import readline from 'node:readline';
 import tty from 'node:tty';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { AgentBroker, applyDifficulty, DIFFICULTIES, routesFrom, upsertRoute } from '../src/index.js';
+import {
+  AgentBroker,
+  applyDifficulty,
+  DIFFICULTIES,
+  DIFFICULTY_KEYS,
+  DIFFICULTY_LABELS,
+  routesFrom,
+  upsertRoute,
+} from '../src/index.js';
 
 const repoRootFromScript = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const SUBSCRIPTION_BILLING = { mode: 'subscription', fallback: 'forbidden' };
 const VERSION_PROBE = { args: ['--version'] };
 const NATIVE_PROMPT_ARGS = ['-p', '{{prompt}}'];
+export const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+const DIFFICULTY_INPUTS = {
+  easy: 'easy_task',
+  standard: 'standard_task',
+  hard: 'hard_task',
+};
 
 export function parseArguments(argv) {
   const options = {
     listClis: false,
-    listModels: false,
     verify: true,
     help: false,
   };
@@ -34,70 +47,15 @@ export function parseArguments(argv) {
     if (argument === '--help' || argument === '-h') options.help = true;
     else if (argument === '--cli') options.cli = next();
     else if (argument === '--model') options.model = next();
+    else if (argument === '--difficulty') options.difficulty = next();
     else if (argument === '--config') options.config = next();
     else if (argument === '--example') options.example = next();
     else if (argument === '--repo-root') options.repoRoot = next();
     else if (argument === '--list-clis') options.listClis = true;
-    else if (argument === '--list-models') options.listModels = true;
     else if (argument === '--no-verify') options.verify = false;
     else throw new TypeError(`Unknown argument: ${argument}`);
   }
   return options;
-}
-
-function modelsFromJson(text) {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return undefined;
-  try {
-    const data = JSON.parse(trimmed);
-    const list = Array.isArray(data) ? data : data.models;
-    if (!Array.isArray(list)) return undefined;
-    const models = [];
-    const seen = new Set();
-    for (const item of list) {
-      const id = typeof item === 'string'
-        ? item
-        : item?.slug || item?.id || item?.model;
-      if (typeof id !== 'string' || !id || seen.has(id)) continue;
-      seen.add(id);
-      const label = typeof item === 'string'
-        ? item
-        : item.display_name || item.name || id;
-      models.push({ id, label });
-    }
-    return models;
-  } catch {
-    return undefined;
-  }
-}
-
-export function parseModelList(text = '') {
-  const fromJson = modelsFromJson(text);
-  if (fromJson) return fromJson;
-  const models = [];
-  const seen = new Set();
-  for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let id;
-    let label = '';
-    if (trimmed.includes('\t')) {
-      const [rawId, ...rest] = trimmed.split('\t');
-      id = rawId.trim();
-      label = rest.join('\t').trim();
-    } else {
-      const bullet = trimmed.match(/^[*+\-]\s+(\S+)(?:\s+(.*))?$/);
-      if (bullet) {
-        id = bullet[1];
-        label = (bullet[2] ?? '').trim();
-      }
-    }
-    if (!id || seen.has(id)) continue;
-    if (/^(available|fetching|models|you|default)\b/i.test(id)) continue;
-    seen.add(id);
-    models.push({ id, label: label || id });
-  }
-  return models;
 }
 
 export function slashCompletions(query, commands = []) {
@@ -151,8 +109,21 @@ export function parseSlashCommand(text) {
   const argument = rest.join(' ').trim();
   if (name === 'add') return { name: 'add', argument };
   if (name === 'delete' || name === 'remove' || name === 'rm') return { name: 'delete', argument };
-  if (name === 'difficulty') return { name: 'difficulty', argument };
   return { name, argument, unknown: true };
+}
+
+export function parseRouteInput(argument) {
+  const parts = (argument ?? '').trim().split(/\s+/).filter(Boolean);
+  const effort = parts.pop();
+  const model = parts.join(' ');
+  return model && EFFORTS.includes(effort) ? { model, effort } : undefined;
+}
+
+export function parseWorkerRouteInput(argument) {
+  const parts = (argument ?? '').trim().split(/\s+/).filter(Boolean);
+  const service = parts.shift();
+  const route = parseRouteInput(parts.join(' '));
+  return service && route ? { service, ...route } : undefined;
 }
 
 export function applyModelList(models = [], { add, remove } = {}) {
@@ -164,26 +135,35 @@ export function applyModelList(models = [], { add, remove } = {}) {
   return remove ? next.filter((id) => id !== remove) : next;
 }
 
-export function parseRouteAssignment(argument, selectedDifficulty) {
-  const trimmed = (argument ?? '').trim();
-  if (!trimmed) return undefined;
-  const parts = trimmed.split(/\s+/);
-  const last = parts.at(-1);
-  if (parts.length >= 2 && Object.hasOwn(DIFFICULTIES, last)) {
-    return { model: parts.slice(0, -1).join(' '), difficulty: last };
-  }
-  if (selectedDifficulty) return { model: trimmed, difficulty: selectedDifficulty };
-  return { model: trimmed, difficulty: undefined };
+export function routeRows(routes) {
+  const byDifficulty = new Map((routes ?? []).map((route) => [route.difficulty, route]));
+  return DIFFICULTY_KEYS.map((difficulty) => ({
+    title: DIFFICULTY_LABELS[difficulty],
+    meta: byDifficulty.has(difficulty)
+      ? `${byDifficulty.get(difficulty).model}${byDifficulty.get(difficulty).effort
+        ? ` · effort:${byDifficulty.get(difficulty).effort}`
+        : ''}`
+      : 'unassigned',
+    value: difficulty,
+    model: byDifficulty.get(difficulty)?.model || '',
+    effort: byDifficulty.get(difficulty)?.effort,
+  }));
 }
 
-export function routeRows(routes) {
-  const byDifficulty = new Map((routes ?? []).map((route) => [route.difficulty, route.model]));
-  return ['low', 'medium', 'high'].map((difficulty) => ({
-    title: difficulty,
-    meta: byDifficulty.get(difficulty) || 'unassigned',
-    value: difficulty,
-    model: byDifficulty.get(difficulty) || '',
-  }));
+export function assignRoute(routes, assignment) {
+  const remaining = (routes ?? []).filter((route) => route.model !== assignment.model);
+  return upsertRoute(remaining, assignment);
+}
+
+export function changeAgentDifficulty(agent, difficulty) {
+  const routes = routesFrom(agent);
+  if (routes.length > 1) {
+    throw new TypeError('Cannot change one difficulty on a worker with multiple routes.');
+  }
+  const changed = applyDifficulty(agent, difficulty);
+  return routes.length === 1
+    ? { ...changed, routes: [{ ...routes[0], difficulty: changed.difficulty }] }
+    : changed;
 }
 
 export function pinnedModelFrom(agent) {
@@ -244,10 +224,16 @@ export function resolveCommand(command, pathEnv = process.env.PATH) {
 function decorateAgent(agent, resolvedCommand) {
   const next = {
     ...agent,
+    ...(basename(resolvedCommand) === 'codex' ? { adapter: 'codex-exec' } : {}),
     resolvedCommand,
     installed: true,
   };
-  if (next.adapter !== 'codex-exec') next.args = usableArgs(agent.args);
+  if (next.adapter === 'codex-exec') {
+    delete next.args;
+    delete next.resume_args;
+  } else {
+    next.args = usableArgs(agent.args);
+  }
   return next;
 }
 
@@ -284,15 +270,16 @@ export function usableArgs(args) {
 }
 
 export function genericWorker(id, command) {
+  const codex = basename(command) === 'codex';
   return applyDifficulty({
     id,
     label: id,
-    adapter: 'native-cli',
+    adapter: codex ? 'codex-exec' : 'native-cli',
     command,
-    args: [...NATIVE_PROMPT_ARGS],
+    ...(codex ? {} : { args: [...NATIVE_PROMPT_ARGS] }),
     probe: { args: [...VERSION_PROBE.args] },
     billing: { ...SUBSCRIPTION_BILLING },
-  }, 'medium');
+  }, 'standard_task');
 }
 
 export function removeAgent(raw, id) {
@@ -320,6 +307,7 @@ export function agentFromTemplate(template, { command, model, models, routes }) 
     resolvedCommand: _resolvedCommand,
     installed: _installed,
     currentModel: _currentModel,
+    args: templateArgs,
     ...agent
   } = template;
   const nextRoutes = Array.isArray(routes) ? routes : routesFrom(agent);
@@ -333,7 +321,9 @@ export function agentFromTemplate(template, { command, model, models, routes }) 
     ...agent,
     enabled: true,
     command,
-    args: pinModel(usableArgs(agent.args), model),
+    ...(agent.adapter === 'codex-exec'
+      ? {}
+      : { args: pinModel(usableArgs(templateArgs), model) }),
     ...(model ? { model } : {}),
     models: nextModels,
     routes: nextRoutes,
@@ -353,35 +343,6 @@ function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
-const MODEL_LIST_INVOCATIONS = [
-  ['models'],
-  ['debug', 'models', '--bundled'],
-];
-
-async function tryListModels(command, args) {
-  try {
-    const brokerInternals = await importBrokerInternals();
-    const outcome = await brokerInternals.runProcess({
-      command,
-      args,
-      cwd: process.cwd(),
-      env: process.env,
-      timeoutMs: 3_000,
-    });
-    return parseModelList(outcome.stdout);
-  } catch {
-    return [];
-  }
-}
-
-export async function listModelsFor(command) {
-  for (const args of MODEL_LIST_INVOCATIONS) {
-    const models = await tryListModels(command, args);
-    if (models.length) return models;
-  }
-  return [];
-}
-
 async function importBrokerInternals() {
   const module = await import('../src/index.js');
   return module.internals;
@@ -399,20 +360,6 @@ export async function connectWorker(options) {
   const catalog = buildCatalog(local);
 
   if (options.listClis) return { catalog, configPath };
-  if (options.listModels) {
-    const entry = resolveWorker(options.cli, local);
-    if (!entry) throw new Error(`Not found: ${options.cli}. Type a CLI command or path.`);
-    const discovered = await listModelsFor(entry.resolvedCommand);
-    const saved = (entry.models ?? []).filter((id) => typeof id === 'string' && id);
-    const models = [
-      ...saved.map((id) => ({
-        id,
-        label: discovered.find((item) => item.id === id)?.label ?? id,
-      })),
-      ...discovered.filter((item) => !saved.includes(item.id)),
-    ];
-    return { catalog, entry, models, configPath };
-  }
 
   const entry = resolveWorker(options.cli, local);
   if (!entry) {
@@ -434,7 +381,7 @@ export async function connectWorker(options) {
     });
   }
   if (options.setRoute) {
-    routes = upsertRoute(routesFrom(entry), options.setRoute);
+    routes = assignRoute(routesFrom(entry), options.setRoute);
     models = applyModelList(entry.models ?? [], { add: options.setRoute.model });
   }
   if (options.clearRoute) {
@@ -442,7 +389,10 @@ export async function connectWorker(options) {
   }
 
   let configured = agentFromTemplate(entry, { command: entry.resolvedCommand, model, models, routes });
-  if (options.difficulty) configured = applyDifficulty(configured, options.difficulty);
+  if (options.setRoute && routes.length === 1) {
+    configured = applyDifficulty(configured, routes[0].difficulty);
+  }
+  if (options.difficulty) configured = changeAgentDifficulty(configured, options.difficulty);
   const next = upsertAgent(local, configured);
   writeJson(configPath, next);
 
@@ -451,6 +401,7 @@ export async function connectWorker(options) {
     agent_id: configured.id,
     command: configured.command,
     model: model ?? null,
+    difficulty: configured.difficulty,
     written: true,
   };
   if (options.verify === false) return result;
@@ -490,8 +441,8 @@ function usage() {
   npm run connect                  # fullscreen TUI; loops until q
   node bin/connect-worker.js --cli <command>
   node bin/connect-worker.js --cli <command> --model <id>
+  node bin/connect-worker.js --cli <id> --difficulty <easy_task|standard_task|hard_task>
   node bin/connect-worker.js --list-clis
-  node bin/connect-worker.js --list-models --cli <id>
 `;
 }
 
@@ -766,7 +717,7 @@ function renderFrame({
 
 async function pickFromList(screen, view) {
   return new Promise((resolve, reject) => {
-    let selected = 0;
+    let selected = Math.max(0, view.initialSelected ?? 0);
     let completionSelected = 0;
     let query = '';
     const visible = () => {
@@ -939,65 +890,61 @@ async function withBusy(screen, message, work, view) {
   }
 }
 
-async function editRoutes(screen, baseOptions, agentId) {
+export async function pickDifficulty(screen, agentId, model) {
+  const selected = await pickFromList(screen, {
+    title: `${agentId} · add route`,
+    meta: model,
+    rows: DIFFICULTY_KEYS.map((difficulty) => ({
+      title: DIFFICULTY_LABELS[difficulty],
+      meta: '',
+      value: difficulty,
+    })),
+    boxLabel: 'task difficulty',
+    boxText: 'Choose the kind of task this route should handle.',
+    boxTone: 'accent',
+    allowInput: false,
+    footer: '↑/↓  ·  Enter select  ·  Esc back',
+  });
+  return selected?.value;
+}
+
+export async function editRoutes(screen, baseOptions, agentId) {
   let routes = [];
-  let catalog = [];
   try {
     const listed = await connectWorker({ ...baseOptions, listClis: true, verify: false });
     const agent = listed.catalog.find((item) => item.id === agentId);
     routes = routesFrom(agent ?? {});
-    const models = await withBusy(
-      screen,
-      'loading models…',
-      () => connectWorker({ ...baseOptions, cli: agentId, listModels: true }),
-      {
-        title: `${agentId} · routes`,
-        meta: 'models',
-        boxLabel: 'routes',
-        boxText: 'Loading models…',
-        boxTone: 'accent',
-        footer: 'please wait',
-      },
-    );
-    catalog = models.models ?? [];
   } catch {
-    catalog = [];
+    routes = [];
   }
 
-  let status = 'Assign one model per difficulty.';
+  let status = 'Assign one model per task difficulty.';
   let tone = 'accent';
   for (;;) {
     const selected = await pickFromList(screen, {
       title: `${agentId} · routes`,
-      meta: 'low / medium / high',
+      meta: DIFFICULTY_KEYS.map((key) => DIFFICULTY_LABELS[key]).join(' / '),
       rows: routeRows(routes),
       boxLabel: 'routes',
       boxText: status,
       boxTone: tone,
       allowInput: true,
-      placeholder: '/add <model> <low|medium|high>',
-      footer: '↑/↓  ·  Tab complete  ·  /add  ·  /delete  ·  Esc',
-      usageAdd: 'Use /add <model> <low|medium|high>',
+      placeholder: '/add <model> <effort>',
+      footer: '↑/↓  ·  Enter select  ·  Tab complete  ·  /add  ·  /delete  ·  Esc',
+      usageAdd: 'Use /add <model> <effort>',
       slash: {
         commands: [
           {
             name: 'add',
-            hint: '<model> <low|medium|high>',
-            arguments: (head) => (head.length === 0
-              ? catalog.map((model) => model.id)
-              : ['low', 'medium', 'high']),
-            complete: (insert) => {
-              const assignment = parseRouteAssignment(parseSlashCommand(insert)?.argument);
-              return Boolean(assignment?.model && assignment?.difficulty);
-            },
+            hint: '<model> <effort>',
+            arguments: (head) => (head.length === 1 ? EFFORTS : []),
+            complete: (insert) => Boolean(parseRouteInput(parseSlashCommand(insert)?.argument)),
           },
           {
             name: 'delete',
-            hint: '<low|medium|high|model>',
+            hint: '<easy|standard|hard|model>',
             arguments: () => [
-              'low',
-              'medium',
-              'high',
+              ...Object.keys(DIFFICULTY_INPUTS),
               ...routes.map((route) => route.model).filter(Boolean),
             ],
           },
@@ -1017,15 +964,19 @@ async function editRoutes(screen, baseOptions, agentId) {
         continue;
       }
       if (selected.slash.name === 'add') {
-        const assignment = parseRouteAssignment(
-          selected.slash.argument,
-          selected.selected?.value,
-        );
-        if (!assignment?.model || !assignment.difficulty) {
-          status = 'Usage: /add <model> <low|medium|high>';
+        const routeInput = parseRouteInput(selected.slash.argument);
+        if (!routeInput) {
+          status = 'Usage: /add <model> <effort>';
           tone = 'error';
           continue;
         }
+        const difficulty = await pickDifficulty(screen, agentId, routeInput.model);
+        if (!difficulty) {
+          status = 'Add cancelled.';
+          tone = 'accent';
+          continue;
+        }
+        const assignment = { ...routeInput, difficulty };
         try {
           await connectWorker({
             ...baseOptions,
@@ -1038,15 +989,16 @@ async function editRoutes(screen, baseOptions, agentId) {
           tone = 'error';
           continue;
         }
-        return `${agentId}  ${assignment.difficulty} → ${assignment.model}`;
+        return `${agentId}  ${DIFFICULTY_LABELS[assignment.difficulty]} → ${assignment.model} · effort:${assignment.effort}`;
       }
       if (selected.slash.name === 'delete') {
-        const slot = Object.hasOwn(DIFFICULTIES, selected.slash.argument)
-          ? selected.slash.argument
-          : routes.find((route) => route.model === selected.slash.argument)?.difficulty
-            ?? selected.selected?.value;
+        const slot = DIFFICULTY_INPUTS[selected.slash.argument]
+          ?? (Object.hasOwn(DIFFICULTIES, selected.slash.argument)
+            ? selected.slash.argument
+            : routes.find((route) => route.model === selected.slash.argument)?.difficulty
+              ?? selected.selected?.value);
         if (!slot) {
-          status = 'Usage: /delete <low|medium|high|model>';
+          status = 'Usage: /delete <easy|standard|hard|model>';
           tone = 'error';
           continue;
         }
@@ -1063,7 +1015,7 @@ async function editRoutes(screen, baseOptions, agentId) {
           continue;
         }
         routes = upsertRoute(routes, { difficulty: slot, clear: true });
-        status = `Cleared ${slot}`;
+        status = `Cleared ${DIFFICULTY_LABELS[slot]}`;
         tone = 'success';
         continue;
       }
@@ -1072,8 +1024,19 @@ async function editRoutes(screen, baseOptions, agentId) {
       continue;
     }
 
-    status = 'Use /add <model> <low|medium|high>';
-    tone = 'error';
+    try {
+      await connectWorker({
+        ...baseOptions,
+        cli: agentId,
+        difficulty: selected.value,
+        verify: false,
+      });
+    } catch (error) {
+      status = error instanceof Error ? error.message : String(error);
+      tone = 'error';
+      continue;
+    }
+    return `${agentId}  difficulty → ${DIFFICULTY_LABELS[selected.value]}`;
   }
 }
 
@@ -1082,6 +1045,7 @@ function printOneShot(result) {
     agent_id: result.agent_id,
     command: result.command,
     model: result.model,
+    difficulty: result.difficulty,
     config: result.configPath,
     probe: result.probe?.status ?? null,
     ping: result.ping?.status ?? null,
@@ -1114,12 +1078,17 @@ async function runInteractiveLoop(baseOptions) {
         boxText,
         boxTone,
         allowInput: true,
-        placeholder: '/add <service>  ·  /delete <service>',
+        placeholder: '/add <service> <model> <effort>  ·  /delete <service>',
         footer: '↑/↓  ·  Tab complete  ·  /add  ·  /delete  ·  Enter  ·  Esc quit',
-        usageAdd: 'Use /add <service>',
+        usageAdd: 'Use /add <service> <model> <effort>',
         slash: {
           commands: [
-            { name: 'add', hint: '<service>' },
+            {
+              name: 'add',
+              hint: '<service> <model> <effort>',
+              arguments: (head) => (head.length >= 2 ? EFFORTS : []),
+              complete: (insert) => Boolean(parseWorkerRouteInput(parseSlashCommand(insert)?.argument)),
+            },
             {
               name: 'delete',
               hint: '<service>',
@@ -1159,30 +1128,48 @@ async function runInteractiveLoop(baseOptions) {
           boxTone = 'success';
           continue;
         }
-        if (worker.slash.name === 'difficulty') {
-          boxText = 'Open a worker, then choose low, medium, or high.';
-          boxTone = 'error';
-          continue;
-        }
         if (worker.slash.name !== 'add') {
           boxText = `Unknown command /${worker.slash.name}`;
           boxTone = 'error';
           continue;
         }
-        if (!worker.slash.argument) {
-          boxText = 'Usage: /add <service>';
+        const registration = parseWorkerRouteInput(worker.slash.argument);
+        if (!registration) {
+          boxText = 'Usage: /add <service> <model> <effort>';
           boxTone = 'error';
           continue;
         }
       }
 
-      const token = worker.slash?.name === 'add' ? worker.slash.argument : worker.value;
+      const registration = worker.slash?.name === 'add'
+        ? parseWorkerRouteInput(worker.slash.argument)
+        : undefined;
+      const token = registration?.service ?? worker.value;
+      let assignment;
+      if (registration) {
+        const difficulty = await pickDifficulty(screen, token, registration.model);
+        if (!difficulty) {
+          boxText = 'Add cancelled.';
+          boxTone = 'accent';
+          continue;
+        }
+        assignment = {
+          model: registration.model,
+          effort: registration.effort,
+          difficulty,
+        };
+      }
       let connected;
       try {
         connected = await withBusy(
           screen,
           `connecting ${token}…`,
-          () => connectWorker({ ...baseOptions, cli: token, verify: 'probe' }),
+          () => connectWorker({
+            ...baseOptions,
+            cli: token,
+            setRoute: assignment,
+            verify: 'probe',
+          }),
           {
             title: 'agent-broker · Connect',
             meta: token,
@@ -1200,6 +1187,12 @@ async function runInteractiveLoop(baseOptions) {
       if (connected.probe?.status !== 'available') {
         boxText = `${token} is not available.`;
         boxTone = 'error';
+        continue;
+      }
+
+      if (assignment) {
+        boxText = `${connected.agent_id}  ${DIFFICULTY_LABELS[assignment.difficulty]} → ${assignment.model} · effort:${assignment.effort}`;
+        boxTone = 'success';
         continue;
       }
 
@@ -1225,13 +1218,6 @@ async function main(argv = process.argv.slice(2)) {
       label: agent.label ?? agent.id,
       command: agent.command,
     })), null, 2)}\n`);
-    return;
-  }
-
-  if (options.listModels) {
-    if (!options.cli) throw new TypeError('--list-models requires --cli.');
-    const { models } = await connectWorker(options);
-    process.stdout.write(`${JSON.stringify(models, null, 2)}\n`);
     return;
   }
 

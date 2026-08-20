@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -267,8 +267,8 @@ contractTest('delegate injects the route model for a difficulty', async (t) => {
       {
         ...fakeAgent({ id: 'multi', logPath: sandbox.logPath }),
         routes: [
-          { difficulty: 'low', model: 'fast' },
-          { difficulty: 'high', model: 'strong' },
+          { difficulty: 'easy_task', model: 'fast' },
+          { difficulty: 'hard_task', model: 'strong' },
         ],
       },
     ]),
@@ -277,7 +277,7 @@ contractTest('delegate injects the route model for a difficulty', async (t) => {
   const result = await broker.delegate({
     task: 'hard work',
     cwd: sandbox.directory,
-    difficulty: 'high',
+    difficulty: 'hard_task',
   });
   assert.equal(result.status, 'completed');
   const run = (await events(sandbox.logPath)).find((event) => event.kind === 'run');
@@ -291,7 +291,7 @@ contractTest('delegate uses a default model when no route matches', async (t) =>
       {
         ...fakeAgent({ id: 'default-model', logPath: sandbox.logPath }),
         model: 'default',
-        routes: [{ difficulty: 'low', model: 'fast' }],
+        routes: [{ difficulty: 'easy_task', model: 'fast' }],
       },
     ]),
   );
@@ -299,7 +299,7 @@ contractTest('delegate uses a default model when no route matches', async (t) =>
   const result = await broker.delegate({
     task: 'hard work',
     cwd: sandbox.directory,
-    difficulty: 'high',
+    difficulty: 'hard_task',
   });
   assert.equal(result.status, 'completed');
   const run = (await events(sandbox.logPath)).find((event) => event.kind === 'run');
@@ -310,19 +310,88 @@ contractTest('delegate with difficulty only uses matching workers', async (t) =>
   const sandbox = await makeSandbox(t);
   const broker = new AgentBroker(
     configFor(sandbox, [
-      { ...fakeAgent({ id: 'easy', logPath: sandbox.logPath }), difficulty: 'low' },
-      { ...fakeAgent({ id: 'hard', logPath: sandbox.logPath }), difficulty: 'high' },
+      { ...fakeAgent({ id: 'easy', logPath: sandbox.logPath }), difficulty: 'easy_task' },
+      { ...fakeAgent({ id: 'hard', logPath: sandbox.logPath }), difficulty: 'hard_task' },
     ]),
   );
 
   const result = await broker.delegate({
     task: 'hard work',
     cwd: sandbox.directory,
-    difficulty: 'high',
+    difficulty: 'hard_task',
   });
 
   assert.equal(result.status, 'completed');
   assert.equal(result.agent_id, 'hard');
+});
+
+contractTest('codex-exec isolates user config and marks the worker as a delegation leaf', async (t) => {
+  const sandbox = await makeSandbox(t);
+  const codexCommand = join(sandbox.directory, 'codex');
+  await writeFile(
+    codexCommand,
+    `#!/usr/bin/env node\nimport ${JSON.stringify(pathToFileURL(fixturePath).href)};\n`,
+  );
+  await chmod(codexCommand, 0o755);
+  const broker = new AgentBroker(
+    configFor(sandbox, [{
+      id: 'codex-leaf',
+      adapter: 'codex-exec',
+      enabled: true,
+      billing: { mode: 'subscription', fallback: 'forbidden' },
+      roles: ['review'],
+      command: codexCommand,
+      env: { FAKE_CLI_LOG: sandbox.logPath },
+      probe: { args: ['--probe'] },
+      routes: [{ difficulty: 'hard_task', model: 'strong', effort: 'high' }],
+    }]),
+  );
+
+  const result = await broker.delegate({
+    task: 'review the design',
+    cwd: sandbox.directory,
+    difficulty: 'hard_task',
+  });
+
+  assert.equal(result.status, 'completed');
+  const run = (await events(sandbox.logPath)).find((event) => event.kind === 'run');
+  assert.deepEqual(run.argv, [
+    'exec',
+    '--ignore-user-config',
+    '--json',
+    '--cd',
+    sandbox.directory,
+    '--model',
+    'strong',
+    '--config',
+    'model_reasoning_effort="high"',
+    '--',
+    'review the design',
+  ]);
+  assert.equal(run.environment.AGENT_BROKER_DEPTH, '1');
+});
+
+contractTest('a broker started inside a worker rejects recursive delegation', async (t) => {
+  const sandbox = await makeSandbox(t);
+  const originalDepth = process.env.AGENT_BROKER_DEPTH;
+  process.env.AGENT_BROKER_DEPTH = '1';
+  let broker;
+  try {
+    broker = new AgentBroker(
+      configFor(sandbox, [fakeAgent({ id: 'nested', logPath: sandbox.logPath })]),
+    );
+  } finally {
+    restoreEnv('AGENT_BROKER_DEPTH', originalDepth);
+  }
+
+  const result = await broker.delegate({
+    task: 'do not delegate again',
+    cwd: sandbox.directory,
+  });
+
+  assert.equal(result.status, 'policy_rejected');
+  assert.match(result.summary, /recursive delegation/i);
+  assert.deepEqual(await events(sandbox.logPath), []);
 });
 
 contractTest('retry-safe work falls back from quota exhaustion to the next priority candidate', async (t) => {
@@ -662,6 +731,7 @@ contractTest('native subprocesses do not receive inherited API-key environment v
       CODEX_API_KEY: null,
       FUTURE_PROVIDER_API_KEY: null,
       CODEX_HOME: 'must-reach-fake-cli',
+      AGENT_BROKER_DEPTH: '1',
     });
   }
 });

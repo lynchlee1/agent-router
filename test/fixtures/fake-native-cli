@@ -18,7 +18,7 @@ function numberOption(name) {
 }
 
 async function record(event) {
-  const logPath = option('--log');
+  const logPath = option('--log') ?? process.env.FAKE_CLI_LOG;
   if (!logPath) return;
 
   const environment = Object.fromEntries(
@@ -29,6 +29,7 @@ async function record(event) {
       'CODEX_API_KEY',
       'FUTURE_PROVIDER_API_KEY',
       'CODEX_HOME',
+      'AGENT_BROKER_DEPTH',
     ].map((name) => [name, process.env[name] ?? null]),
   );
 

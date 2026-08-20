@@ -20,7 +20,17 @@ cp config/agents.example.json config/agents.local.json
 npm run connect
 ```
 
-워커는 미리 정해 두지 않습니다. 저장소 루트에서 `npm run connect`로 CLI 이름이나 경로를 입력해 `config/agents.local.json`에 추가합니다. 모든 에이전트는 `billing.mode: "subscription"`과 `billing.fallback: "forbidden"`을 사용해야 하며, broker는 자격 증명을 저장하거나 종량제 API로 대체하지 않습니다. 이 파일은 Git에 추가하지 마세요.
+워커는 미리 정해 두지 않습니다. 저장소 루트에서 `npm run connect`를 실행하고 `/add <service> <model> <effort>`를 입력한 뒤 task difficulty를 선택해 `config/agents.local.json`에 추가합니다. 기존 워커의 route 화면에서는 `/add <model> <effort>`를 사용합니다. 모델 목록은 서비스별 명령으로 조회하지 않습니다. 모든 에이전트는 `billing.mode: "subscription"`과 `billing.fallback: "forbidden"`을 사용해야 하며, broker는 자격 증명을 저장하거나 종량제 API로 대체하지 않습니다. 이 파일은 Git에 추가하지 마세요.
+
+Task difficulty는 문제 자체의 난이도이고, `effort`는 선택된 모델의 추론 노력 수준입니다. 두 값은 서로 독립적입니다.
+
+| 내부 값 | UI 표시 | 기준 |
+| --- | --- | --- |
+| `easy_task` | Easy task | 범위가 작고 명확하며 설계 판단이 필요 없는 작업 |
+| `standard_task` | Standard task | 조사, 여러 파일 수정, 일반적인 디버깅 작업(기본값) |
+| `hard_task` | Hard task | 아키텍처, 보안, 파괴적 위험, 어려운 디버깅, 최종 리뷰 |
+
+기존 설정의 difficulty 값은 `low` → `easy_task`, `medium` → `standard_task`, `high` → `hard_task`로 바꿔야 합니다. `effort`의 `low`, `medium`, `high` 값은 바꾸지 않습니다.
 
 ```bash
 codex mcp add agent-broker -- node /absolute/path/to/agent-router/bin/agent-broker.js --config /absolute/path/to/agent-router/config/agents.local.json
@@ -32,16 +42,16 @@ Codex 세션을 다시 시작한 뒤 다음과 같이 사용합니다.
 list_agents({ refresh: true })
 delegate({
   task: "Explore the repository and report the smallest safe implementation plan.",
-  difficulty: "low",
+  difficulty: "easy_task",
   retry_safe: true,
   cwd: "/absolute/path/to/repository"
 })
 continue({ session_id: "broker-session-id", task: "Run the focused tests and summarize failures." })
 ```
 
-후보는 `agent_ids` 순서로 시도합니다. 시작 전에 확인된 비활성·인증 실패·사용 중 상태는 다음 후보로 넘어가지만, 시작 후 할당량 소진은 `retry_safe: true`인 작업만 재시도합니다. 루트 세션과 같은 CLI를 워커로 지정하면 안 됩니다.
+후보는 `agent_ids` 순서로 시도합니다. 시작 전에 확인된 비활성·인증 실패·사용 중 상태는 다음 후보로 넘어가지만, 시작 후 할당량 소진은 `retry_safe: true`인 작업만 재시도합니다. 워커는 leaf로 실행되며 `agent-broker`를 다시 호출할 수 없습니다.
 
-`native-cli`는 비상태형 CLI용 기본 어댑터이고, `codex-exec`는 `codex exec --json`과 `resume`을 사용하는 상태 유지형 어댑터입니다. 다른 CLI는 로컬 어댑터 모듈로 추가할 수 있습니다. 실패는 원인별로 구분되며, 동시 실행 한도를 넘으면 대기열 대신 `busy`를 반환합니다. 상세 기록은 `state_dir`에 남습니다.
+`native-cli`는 비상태형 CLI용 기본 어댑터이고, `codex-exec`는 격리된 사용자 설정으로 `codex exec --json`과 `resume`을 사용하는 상태 유지형 어댑터입니다. 다른 CLI는 로컬 어댑터 모듈로 추가할 수 있습니다. 실패는 원인별로 구분되며, 동시 실행 한도를 넘으면 대기열 대신 `busy`를 반환합니다. 상세 기록은 `state_dir`에 남습니다.
 
 MCP 서버 자체의 등록·해제·로그인은 `codex mcp add/remove/login/logout` 또는 `claude mcp add/remove/login/logout` 같은 호스트 CLI 명령을 그대로 사용하세요. broker는 그 위에서 하위 에이전트 실행만 담당합니다.
 

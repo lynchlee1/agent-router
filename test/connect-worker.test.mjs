@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
@@ -12,21 +12,21 @@ const scriptPath = join(
   'bin',
   'connect-worker.js',
 );
+const fixturePath = join(testDirectory, 'fixtures', 'fake-native-cli');
 const connect = await import(pathToFileURL(scriptPath).href);
 
 test('slashCompletions filters commands and arguments', () => {
   const commands = [
     {
       name: 'add',
-      hint: '<model> <effort>',
-      arguments: (head) => (head.length === 1 ? connect.EFFORTS : []),
-      complete: (insert) => Boolean(connect.parseRouteInput(connect.parseSlashCommand(insert)?.argument)),
+      hint: '<service> <model> <effort>',
+      complete: (insert) => Boolean(connect.parseWorkerRouteInput(connect.parseSlashCommand(insert)?.argument)),
     },
-    { name: 'delete', hint: '<id>', arguments: () => ['gpt-x'] },
+    { name: 'delete', hint: '<service> <model> <effort>', arguments: () => ['gpt-x'] },
   ];
   assert.deepEqual(
     connect.slashCompletions('/', commands).map((item) => item.title),
-    ['/add    <model> <effort>', '/delete <id>'],
+    ['/add    <service> <model> <effort>', '/delete <service> <model> <effort>'],
   );
   assert.deepEqual(
     connect.slashCompletions('/ad', commands).map((item) => item.insert),
@@ -38,7 +38,7 @@ test('slashCompletions filters commands and arguments', () => {
   );
   assert.deepEqual(
     connect.slashCompletions('/add gpt-x h', commands).map((item) => item.insert),
-    ['/add gpt-x high'],
+    [],
   );
 });
 
@@ -51,15 +51,6 @@ test('parseSlashCommand maps /add and /delete', () => {
   assert.equal(connect.parseSlashCommand('add model-a'), undefined);
 });
 
-test('parseRouteInput reads a model and effort', () => {
-  assert.deepEqual(connect.parseRouteInput('gpt-5.6-sol high'), {
-    model: 'gpt-5.6-sol',
-    effort: 'high',
-  });
-  assert.equal(connect.parseRouteInput('gpt-5.6-sol'), undefined);
-  assert.equal(connect.parseRouteInput('gpt-5.6-sol extreme'), undefined);
-});
-
 test('parseWorkerRouteInput requires service, model, and effort', () => {
   assert.deepEqual(connect.parseWorkerRouteInput('codex gpt-5.6-sol high'), {
     service: 'codex',
@@ -68,19 +59,17 @@ test('parseWorkerRouteInput requires service, model, and effort', () => {
   });
   assert.equal(connect.parseWorkerRouteInput('codex'), undefined);
   assert.equal(connect.parseWorkerRouteInput('codex gpt-5.6-sol'), undefined);
-  assert.equal(connect.parseWorkerRouteInput('codex gpt-5.6-sol extreme'), undefined);
+  assert.deepEqual(connect.parseWorkerRouteInput('codex gpt-5.6-sol custom'), {
+    service: 'codex',
+    model: 'gpt-5.6-sol',
+    effort: 'custom',
+  });
 });
 
-test('parseArguments accepts a difficulty change', () => {
-  assert.deepEqual(
-    connect.parseArguments(['--cli', 'worker', '--difficulty', 'hard_task', '--no-verify']),
-    {
-      cli: 'worker',
-      difficulty: 'hard_task',
-      listClis: false,
-      verify: false,
-      help: false,
-    },
+test('parseArguments rejects the removed worker-level difficulty option', () => {
+  assert.throws(
+    () => connect.parseArguments(['--cli', 'worker', '--difficulty', 'hard_task']),
+    /Unknown argument: --difficulty/,
   );
 });
 
@@ -90,25 +79,6 @@ test('removeAgent drops one worker from local config', () => {
     'alpha',
   );
   assert.deepEqual(next.agents.map((agent) => agent.id), ['beta']);
-});
-
-test('changeAgentDifficulty moves a single route', () => {
-  const changed = connect.changeAgentDifficulty({
-    difficulty: 'easy_task',
-    routes: [{ difficulty: 'easy_task', model: 'model-a' }],
-  }, 'hard_task');
-
-  assert.equal(changed.difficulty, 'hard_task');
-  assert.deepEqual(changed.routes, [{ difficulty: 'hard_task', model: 'model-a' }]);
-  assert.throws(
-    () => connect.changeAgentDifficulty({
-      routes: [
-        { difficulty: 'easy_task', model: 'fast' },
-        { difficulty: 'hard_task', model: 'strong' },
-      ],
-    }, 'standard_task'),
-    /multiple routes/i,
-  );
 });
 
 test('assignRoute moves a model instead of duplicating it', () => {
@@ -121,6 +91,22 @@ test('assignRoute moves a model instead of duplicating it', () => {
   );
 });
 
+test('removeRoute removes only the matching model and effort', () => {
+  const routes = [
+    { difficulty: 'easy_task', model: 'model-a', effort: 'low' },
+    { difficulty: 'standard_task', model: 'model-a', effort: 'high' },
+    { difficulty: 'hard_task', model: 'model-b', effort: 'high' },
+  ];
+  assert.deepEqual(
+    connect.removeRoute(routes, { model: 'model-a', effort: 'high' }),
+    [routes[0], routes[2]],
+  );
+  assert.deepEqual(
+    connect.removeRoute(routes, { model: 'model-a', effort: 'custom' }),
+    routes,
+  );
+});
+
 test('routeRows exposes friendly labels while preserving internal values', () => {
   const rows = connect.routeRows([{ difficulty: 'easy_task', model: 'model-a' }]);
 
@@ -129,12 +115,35 @@ test('routeRows exposes friendly labels while preserving internal values', () =>
     { title: 'Standard task', value: 'standard_task' },
     { title: 'Hard task', value: 'hard_task' },
   ]);
+  assert.equal(
+    connect.formatRouteAssignment({ difficulty: 'hard_task', model: 'model-a', effort: 'high' }),
+    'Hard task → model-a · effort:high',
+  );
 });
 
-test('applyModelList adds and removes without duplicates', () => {
+test('modelRows exposes each configured route as a selectable model', () => {
+  const rows = connect.modelRows([
+    {
+      id: 'worker',
+      command: '/bin/worker',
+      routes: [
+        { difficulty: 'easy_task', model: 'fast', effort: 'low' },
+        { difficulty: 'hard_task', model: 'strong', effort: 'high' },
+      ],
+    },
+  ]);
+
+  assert.deepEqual(rows.map(({ title, value, difficulty, effort }) => ({
+    title, value, difficulty, effort,
+  })), [
+    { title: 'fast', value: 'worker', difficulty: 'easy_task', effort: 'low' },
+    { title: 'strong', value: 'worker', difficulty: 'hard_task', effort: 'high' },
+  ]);
+});
+
+test('applyModelList adds without duplicates', () => {
   assert.deepEqual(connect.applyModelList(['a'], { add: 'b' }), ['a', 'b']);
   assert.deepEqual(connect.applyModelList(['a', 'b'], { add: 'a' }), ['a', 'b']);
-  assert.deepEqual(connect.applyModelList(['a', 'b'], { remove: 'a' }), ['b']);
 });
 
 test('pinModel inserts or replaces --model after the prompt', () => {
@@ -217,42 +226,80 @@ test('pickDifficulty returns the level selected in the picker', async () => {
   assert.equal(await connect.pickDifficulty(screen, 'worker', 'model-a'), 'standard_task');
 });
 
-test('editRoutes accepts /add model effort and then selects difficulty', async (t) => {
-  const { directory, examplePath, configPath } = await makeConnectSandbox(t);
-  await writeFile(configPath, JSON.stringify({
-    state_dir: join(directory, 'state'),
-    agents: [{
-      id: 'worker',
-      adapter: 'codex-exec',
-      command: process.execPath,
-      args: ['-p', '{{prompt}}'],
-      billing: { mode: 'subscription', fallback: 'forbidden' },
-      difficulty: 'standard_task',
-      routes: [],
-    }],
-  }));
-  let screenCalls = 0;
+test('pickDifficulty wraps the selected difficulty description instead of truncating it', async () => {
+  let rendered = [];
   const screen = {
-    size: () => ({ cols: 100, rows: 24 }),
-    paint: () => {},
+    size: () => ({ cols: 40, rows: 12 }),
+    paint: (lines) => {
+      rendered = lines;
+    },
     onKey: (handler) => {
-      const keys = screenCalls++ === 0
-        ? [...'/add model-a high', 'enter']
-        : ['down', 'down', 'enter'];
-      setImmediate(() => keys.forEach(handler));
+      setImmediate(() => handler('enter'));
       return () => {};
     },
   };
-  const result = await connect.editRoutes(screen, {
-    example: examplePath,
-    config: configPath,
-    repoRoot: directory,
-  }, 'worker');
 
-  assert.equal(result, 'worker  Hard task → model-a · effort:high');
-  const saved = JSON.parse(await readFile(configPath, 'utf8'));
-  assert.equal(saved.agents[0].difficulty, 'hard_task');
-  assert.deepEqual(saved.agents[0].routes, [{ difficulty: 'hard_task', model: 'model-a', effort: 'high' }]);
+  assert.equal(await connect.pickDifficulty(screen, 'worker', 'model-a'), 'easy_task');
+  const plain = rendered.map((line) => line.replace(/\x1b\[[0-9;]*m/g, '').trim());
+  const description = 'Clear, limited scope with no design decision.';
+  assert.equal(plain.filter(Boolean).join(' ').includes(description), true);
+});
+
+test('pickModelAction offers Verify before other model actions', async () => {
+  const screenFor = (keys) => ({
+    size: () => ({ cols: 100, rows: 24 }),
+    paint: () => {},
+    onKey: (handler) => {
+      setImmediate(() => keys.forEach(handler));
+      return () => {};
+    },
+  });
+  const route = {
+    value: 'worker',
+    model: 'model-a',
+    difficulty: 'standard_task',
+  };
+
+  assert.equal(await connect.pickModelAction(screenFor(['enter']), route), 'verify');
+  assert.equal(await connect.pickModelAction(screenFor(['down', 'enter']), route), 'delete');
+  assert.equal(await connect.pickModelAction(screenFor(['down', 'down', 'enter']), route), 'back');
+});
+
+test('formatVerificationResult reports the selected model outcome', () => {
+  const route = { value: 'worker', model: 'model-a', difficulty: 'standard_task' };
+  assert.equal(
+    connect.formatVerificationResult(route, { verified: true }),
+    'Verified model-a (worker · Standard task).',
+  );
+  assert.equal(
+    connect.formatVerificationResult(route, { verified: false, summary: 'login required' }),
+    'Verification failed for model-a: login required',
+  );
+});
+
+test('showVerificationResult waits for close and renders the result', async () => {
+  let rendered = [];
+  const screen = {
+    size: () => ({ cols: 100, rows: 24 }),
+    paint: (lines) => {
+      rendered = lines;
+    },
+    onKey: (handler) => {
+      setImmediate(() => handler('enter'));
+      return () => {};
+    },
+  };
+  const route = { value: 'worker', model: 'model-a', difficulty: 'standard_task' };
+
+  await connect.showVerificationResult(screen, route, {
+    verified: true,
+    summary: 'OK',
+  });
+
+  const plain = rendered.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+  assert.match(plain, /Connected/);
+  assert.match(plain, /OK/);
+  assert.match(plain, /Enter or Esc close/);
 });
 
 test('filterRows keeps rows matching the typed query', () => {
@@ -372,7 +419,7 @@ test('connectWorker writes the selected model into local config without a ping',
   assert.deepEqual(saved.agents[0].models, ['model-a']);
 });
 
-test('connectWorker changes the worker difficulty and its single route', async (t) => {
+test('connectWorker moves an existing model to the selected route', async (t) => {
   const { directory, examplePath, configPath } = await makeConnectSandbox(t);
   const command = process.execPath;
   await writeFile(configPath, JSON.stringify({
@@ -391,20 +438,108 @@ test('connectWorker changes the worker difficulty and its single route', async (
 
   const result = await connect.connectWorker({
     cli: 'worker',
-    difficulty: 'hard_task',
+    setRoute: { difficulty: 'hard_task', model: 'model-a' },
     example: examplePath,
     config: configPath,
     repoRoot: directory,
     verify: false,
   });
 
-  assert.equal(result.difficulty, 'hard_task');
   const saved = JSON.parse(await readFile(configPath, 'utf8'));
-  assert.equal(saved.agents[0].difficulty, 'hard_task');
+  assert.deepEqual(result.routes, [{ difficulty: 'hard_task', model: 'model-a' }]);
+  assert.equal(Object.hasOwn(saved.agents[0], 'difficulty'), false);
   assert.deepEqual(saved.agents[0].routes, [{ difficulty: 'hard_task', model: 'model-a' }]);
 });
 
-test('connectWorker moves an existing model to the selected route', async (t) => {
+test('verifyWorker sends a short prompt through the selected model without rewriting config', async (t) => {
+  const { directory, configPath } = await makeConnectSandbox(t);
+  const stateDir = join(directory, 'state');
+  const logPath = join(directory, 'fake-cli.jsonl');
+  await mkdir(stateDir);
+  await writeFile(configPath, JSON.stringify({
+    state_dir: stateDir,
+    agents: [{
+      id: 'worker',
+      adapter: 'native-cli',
+      enabled: true,
+      command: process.execPath,
+      args: [
+        fixturePath,
+        '--mode', 'complete',
+        '--label', 'worker',
+        '--log', logPath,
+        '--prompt', '{{prompt}}',
+        '--cwd', '{{cwd}}',
+      ],
+      probe: {
+        args: [
+          fixturePath,
+          '--probe',
+          '--mode', 'available',
+          '--label', 'worker',
+          '--log', logPath,
+        ],
+      },
+      billing: { mode: 'subscription', fallback: 'forbidden' },
+      routes: [{ difficulty: 'hard_task', model: 'strong', effort: 'high' }],
+    }],
+  }));
+  const before = await readFile(configPath, 'utf8');
+
+  const result = await connect.verifyWorker({
+    agentId: 'worker',
+    difficulty: 'hard_task',
+    model: 'strong',
+    config: configPath,
+    repoRoot: directory,
+  });
+
+  assert.equal(result.verified, true);
+  assert.equal(result.ping.status, 'completed');
+  assert.equal(await readFile(configPath, 'utf8'), before);
+  const events = (await readFile(logPath, 'utf8')).trim().split('\n').map(JSON.parse);
+  const run = events.find((event) => event.kind === 'run');
+  assert.equal(run.prompt, 'Reply exactly: OK');
+  assert.equal(run.argv[run.argv.indexOf('--model') + 1], 'strong');
+});
+
+test('connectWorker deletes only the exactly matching route', async (t) => {
+  const { directory, examplePath, configPath } = await makeConnectSandbox(t);
+  const command = process.execPath;
+  const routes = [
+    { difficulty: 'easy_task', model: 'model-a', effort: 'low' },
+    { difficulty: 'standard_task', model: 'model-a', effort: 'high' },
+    { difficulty: 'hard_task', model: 'model-b', effort: 'high' },
+  ];
+  await writeFile(configPath, JSON.stringify({
+    state_dir: join(directory, 'state'),
+    agents: [{
+      id: 'worker',
+      adapter: 'native-cli',
+      command,
+      args: ['-p', '{{prompt}}'],
+      probe: { args: ['--version'] },
+      billing: { mode: 'subscription', fallback: 'forbidden' },
+      models: ['model-a', 'model-b'],
+      routes,
+    }],
+  }));
+
+  await connect.connectWorker({
+    cli: 'worker',
+    removeRoute: { model: 'model-a', effort: 'high' },
+    example: examplePath,
+    config: configPath,
+    repoRoot: directory,
+    verify: false,
+  });
+
+  const saved = JSON.parse(await readFile(configPath, 'utf8'));
+  assert.deepEqual(saved.agents[0].routes, [routes[0], routes[2]]);
+  assert.deepEqual(saved.agents[0].models, ['model-a', 'model-b']);
+});
+
+test('connectWorker removes a model after deleting its last route', async (t) => {
   const { directory, examplePath, configPath } = await makeConnectSandbox(t);
   const command = process.execPath;
   await writeFile(configPath, JSON.stringify({
@@ -416,14 +551,17 @@ test('connectWorker moves an existing model to the selected route', async (t) =>
       args: ['-p', '{{prompt}}'],
       probe: { args: ['--version'] },
       billing: { mode: 'subscription', fallback: 'forbidden' },
-      difficulty: 'easy_task',
-      routes: [{ difficulty: 'easy_task', model: 'model-a' }],
+      models: ['model-a', 'model-b'],
+      routes: [
+        { difficulty: 'easy_task', model: 'model-a', effort: 'low' },
+        { difficulty: 'hard_task', model: 'model-b', effort: 'high' },
+      ],
     }],
   }));
 
   await connect.connectWorker({
     cli: 'worker',
-    setRoute: { difficulty: 'hard_task', model: 'model-a' },
+    removeRoute: { model: 'model-a', effort: 'low' },
     example: examplePath,
     config: configPath,
     repoRoot: directory,
@@ -431,6 +569,36 @@ test('connectWorker moves an existing model to the selected route', async (t) =>
   });
 
   const saved = JSON.parse(await readFile(configPath, 'utf8'));
-  assert.equal(saved.agents[0].difficulty, 'hard_task');
-  assert.deepEqual(saved.agents[0].routes, [{ difficulty: 'hard_task', model: 'model-a' }]);
+  assert.deepEqual(saved.agents[0].routes, [
+    { difficulty: 'hard_task', model: 'model-b', effort: 'high' },
+  ]);
+  assert.deepEqual(saved.agents[0].models, ['model-b']);
+});
+
+test('connectWorker rejects a delete when effort does not match', async (t) => {
+  const { directory, examplePath, configPath } = await makeConnectSandbox(t);
+  const command = process.execPath;
+  const config = {
+    state_dir: join(directory, 'state'),
+    agents: [{
+      id: 'worker',
+      command,
+      args: ['-p', '{{prompt}}'],
+      routes: [{ difficulty: 'easy_task', model: 'model-a', effort: 'low' }],
+    }],
+  };
+  await writeFile(configPath, JSON.stringify(config));
+
+  await assert.rejects(
+    connect.connectWorker({
+      cli: 'worker',
+      removeRoute: { model: 'model-a', effort: 'high' },
+      example: examplePath,
+      config: configPath,
+      repoRoot: directory,
+      verify: false,
+    }),
+    /Route not found: worker model-a high/,
+  );
+  assert.deepEqual(JSON.parse(await readFile(configPath, 'utf8')), config);
 });

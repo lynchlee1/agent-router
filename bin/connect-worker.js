@@ -9,11 +9,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   AgentBroker,
-  applyDifficulty,
-  DIFFICULTIES,
-  DIFFICULTY_KEYS,
-  DIFFICULTY_LABELS,
   routesFrom,
+  TASK_DIFFICULTIES,
+  taskDifficulty,
   upsertRoute,
 } from '../src/index.js';
 
@@ -21,12 +19,6 @@ const repoRootFromScript = resolve(fileURLToPath(new URL('../', import.meta.url)
 const SUBSCRIPTION_BILLING = { mode: 'subscription', fallback: 'forbidden' };
 const VERSION_PROBE = { args: ['--version'] };
 const NATIVE_PROMPT_ARGS = ['-p', '{{prompt}}'];
-export const EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
-const DIFFICULTY_INPUTS = {
-  easy: 'easy_task',
-  standard: 'standard_task',
-  hard: 'hard_task',
-};
 
 export function parseArguments(argv) {
   const options = {
@@ -47,7 +39,6 @@ export function parseArguments(argv) {
     if (argument === '--help' || argument === '-h') options.help = true;
     else if (argument === '--cli') options.cli = next();
     else if (argument === '--model') options.model = next();
-    else if (argument === '--difficulty') options.difficulty = next();
     else if (argument === '--config') options.config = next();
     else if (argument === '--example') options.example = next();
     else if (argument === '--repo-root') options.repoRoot = next();
@@ -112,42 +103,66 @@ export function parseSlashCommand(text) {
   return { name, argument, unknown: true };
 }
 
-export function parseRouteInput(argument) {
-  const parts = (argument ?? '').trim().split(/\s+/).filter(Boolean);
-  const effort = parts.pop();
-  const model = parts.join(' ');
-  return model && EFFORTS.includes(effort) ? { model, effort } : undefined;
-}
-
 export function parseWorkerRouteInput(argument) {
   const parts = (argument ?? '').trim().split(/\s+/).filter(Boolean);
   const service = parts.shift();
-  const route = parseRouteInput(parts.join(' '));
-  return service && route ? { service, ...route } : undefined;
+  const effort = parts.pop();
+  const model = parts.join(' ');
+  return service && model && effort ? { service, model, effort } : undefined;
 }
 
-export function applyModelList(models = [], { add, remove } = {}) {
+export function applyModelList(models = [], { add } = {}) {
   const next = [];
   for (const id of models) {
     if (typeof id === 'string' && id && !next.includes(id)) next.push(id);
   }
   if (add && !next.includes(add)) next.push(add);
-  return remove ? next.filter((id) => id !== remove) : next;
+  return next;
 }
 
 export function routeRows(routes) {
   const byDifficulty = new Map((routes ?? []).map((route) => [route.difficulty, route]));
-  return DIFFICULTY_KEYS.map((difficulty) => ({
-    title: DIFFICULTY_LABELS[difficulty],
-    meta: byDifficulty.has(difficulty)
-      ? `${byDifficulty.get(difficulty).model}${byDifficulty.get(difficulty).effort
-        ? ` · effort:${byDifficulty.get(difficulty).effort}`
+  return TASK_DIFFICULTIES.map(({ value, title }) => ({
+    title,
+    meta: byDifficulty.has(value)
+      ? `${byDifficulty.get(value).model}${byDifficulty.get(value).effort
+        ? ` · effort:${byDifficulty.get(value).effort}`
         : ''}`
       : 'unassigned',
-    value: difficulty,
-    model: byDifficulty.get(difficulty)?.model || '',
-    effort: byDifficulty.get(difficulty)?.effort,
+    value,
+    model: byDifficulty.get(value)?.model || '',
+    effort: byDifficulty.get(value)?.effort,
   }));
+}
+
+export function modelRows(catalog) {
+  return catalog.flatMap((agent) => {
+    const routes = routesFrom(agent);
+    if (!routes.length) {
+      return [{
+        title: agent.id,
+        detail: 'no routes',
+        meta: displayPath(agent.command),
+        value: agent.id,
+      }];
+    }
+    return routes.map((route) => ({
+      title: route.model,
+      detail: `${agent.id} · ${taskDifficulty(route.difficulty).title}${route.effort
+        ? ` · effort:${route.effort}`
+        : ''}`,
+      meta: displayPath(agent.command),
+      value: agent.id,
+      difficulty: route.difficulty,
+      model: route.model,
+      effort: route.effort,
+    }));
+  });
+}
+
+export function formatRouteAssignment(route) {
+  const effort = route.effort ? ` · effort:${route.effort}` : '';
+  return `${taskDifficulty(route.difficulty).title} → ${route.model}${effort}`;
 }
 
 export function assignRoute(routes, assignment) {
@@ -155,15 +170,8 @@ export function assignRoute(routes, assignment) {
   return upsertRoute(remaining, assignment);
 }
 
-export function changeAgentDifficulty(agent, difficulty) {
-  const routes = routesFrom(agent);
-  if (routes.length > 1) {
-    throw new TypeError('Cannot change one difficulty on a worker with multiple routes.');
-  }
-  const changed = applyDifficulty(agent, difficulty);
-  return routes.length === 1
-    ? { ...changed, routes: [{ ...routes[0], difficulty: changed.difficulty }] }
-    : changed;
+export function removeRoute(routes, { model, effort }) {
+  return (routes ?? []).filter((route) => route.model !== model || route.effort !== effort);
 }
 
 export function pinnedModelFrom(agent) {
@@ -201,7 +209,7 @@ export function upsertAgent(raw, agent) {
   const agents = [...(raw.agents ?? [])];
   const index = agents.findIndex((candidate) => candidate.id === agent.id);
   if (index === -1) agents.push(agent);
-  else agents[index] = { ...agents[index], ...agent };
+  else agents[index] = agent;
   return { ...raw, agents };
 }
 
@@ -271,7 +279,7 @@ export function usableArgs(args) {
 
 export function genericWorker(id, command) {
   const codex = basename(command) === 'codex';
-  return applyDifficulty({
+  return {
     id,
     label: id,
     adapter: codex ? 'codex-exec' : 'native-cli',
@@ -279,7 +287,7 @@ export function genericWorker(id, command) {
     ...(codex ? {} : { args: [...NATIVE_PROMPT_ARGS] }),
     probe: { args: [...VERSION_PROBE.args] },
     billing: { ...SUBSCRIPTION_BILLING },
-  }, 'standard_task');
+  };
 }
 
 export function removeAgent(raw, id) {
@@ -304,6 +312,7 @@ export function resolveWorker(token, local, pathEnv) {
 
 export function agentFromTemplate(template, { command, model, models, routes }) {
   const {
+    difficulty: _legacyDifficulty,
     resolvedCommand: _resolvedCommand,
     installed: _installed,
     currentModel: _currentModel,
@@ -366,33 +375,35 @@ export async function connectWorker(options) {
     throw new Error(`Not found: ${options.cli}. Use /add <service>.`);
   }
 
-  if (options.removeWorker) {
-    writeJson(configPath, removeAgent(local, entry.id));
-    return { configPath, agent_id: entry.id, removed: true, written: true };
+  if (options.removeRoute) {
+    const currentRoutes = routesFrom(entry);
+    const routes = removeRoute(currentRoutes, options.removeRoute);
+    if (routes.length === currentRoutes.length) {
+      throw new Error(`Route not found: ${entry.id} ${options.removeRoute.model} ${options.removeRoute.effort}`);
+    }
+    const modelStillReferenced = routes.some((route) => route.model === options.removeRoute.model)
+      || entry.model === options.removeRoute.model
+      || pinnedModelFrom(entry) === options.removeRoute.model;
+    const models = modelStillReferenced
+      ? entry.models
+      : (entry.models ?? []).filter((model) => model !== options.removeRoute.model);
+    const configured = agentFromTemplate(entry, {
+      command: entry.resolvedCommand,
+      models,
+      routes,
+    });
+    writeJson(configPath, upsertAgent(local, configured));
+    return { configPath, agent_id: entry.id, routes, removed: true, written: true };
   }
 
   let model = options.model || undefined;
   let models;
   let routes;
-  if (options.addModel || options.removeModel) {
-    models = applyModelList(entry.models ?? [], {
-      add: options.addModel,
-      remove: options.removeModel,
-    });
-  }
   if (options.setRoute) {
     routes = assignRoute(routesFrom(entry), options.setRoute);
     models = applyModelList(entry.models ?? [], { add: options.setRoute.model });
   }
-  if (options.clearRoute) {
-    routes = upsertRoute(routesFrom(entry), { difficulty: options.clearRoute, clear: true });
-  }
-
   let configured = agentFromTemplate(entry, { command: entry.resolvedCommand, model, models, routes });
-  if (options.setRoute && routes.length === 1) {
-    configured = applyDifficulty(configured, routes[0].difficulty);
-  }
-  if (options.difficulty) configured = changeAgentDifficulty(configured, options.difficulty);
   const next = upsertAgent(local, configured);
   writeJson(configPath, next);
 
@@ -401,7 +412,7 @@ export async function connectWorker(options) {
     agent_id: configured.id,
     command: configured.command,
     model: model ?? null,
-    difficulty: configured.difficulty,
+    routes: configured.routes,
     written: true,
   };
   if (options.verify === false) return result;
@@ -436,12 +447,44 @@ export async function connectWorker(options) {
   return result;
 }
 
+export async function verifyWorker(options) {
+  const repoRoot = resolve(options.repoRoot ?? repoRootFromScript);
+  const configPath = resolve(options.config ?? join(repoRoot, 'config', 'agents.local.json'));
+  const broker = new AgentBroker(configPath);
+  const listed = await broker.listAgents({ refresh: true });
+  const probe = listed.agents.find((agent) => agent.id === options.agentId);
+  const result = {
+    agent_id: options.agentId,
+    model: options.model,
+    probe,
+    verified: false,
+  };
+  if (probe?.status !== 'available') {
+    result.summary = probe?.reason ?? `${options.agentId} is not available.`;
+    return result;
+  }
+
+  const ping = await broker.delegate({
+    task: 'Reply exactly: OK',
+    agent_ids: [options.agentId],
+    difficulty: options.difficulty,
+    cwd: repoRoot,
+    timeout_ms: options.timeoutMs ?? 30_000,
+  });
+  result.ping = {
+    status: ping.status,
+    summary: ping.summary,
+  };
+  result.verified = ping.status === 'completed';
+  result.summary = ping.summary;
+  return result;
+}
+
 function usage() {
   return `Usage:
   npm run connect                  # fullscreen TUI; loops until q
   node bin/connect-worker.js --cli <command>
   node bin/connect-worker.js --cli <command> --model <id>
-  node bin/connect-worker.js --cli <id> --difficulty <easy_task|standard_task|hard_task>
   node bin/connect-worker.js --list-clis
 `;
 }
@@ -488,6 +531,25 @@ function ellipsize(text, width) {
   if (chars.length <= width) return text;
   if (width === 1) return '…';
   return `${chars.slice(0, width - 1).join('')}…`;
+}
+
+export function wrapText(text, width) {
+  if (width <= 0) return [];
+  const words = String(text).trim().split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    if (!line) {
+      line = word;
+    } else if (visLen(`${line} ${word}`) <= width) {
+      line += ` ${word}`;
+    } else {
+      lines.push(line);
+      line = word;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
 }
 
 function displayPath(filePath) {
@@ -669,7 +731,11 @@ function renderFrame({
   const { cols, rows: height } = screen.size();
   const menu = completions.slice(0, Math.min(6, completions.length));
   const menuHeight = menu.length;
-  const listBudget = Math.max(1, height - 6 - menuHeight);
+  const description = !busy ? rows[selected]?.description : undefined;
+  const descriptionLines = description
+    ? wrapText(description, Math.max(1, cols - 2))
+    : [];
+  const listBudget = Math.max(1, height - 6 - menuHeight - descriptionLines.length);
   const lines = [titleLine(title, meta, cols), ''];
 
   if (busy) {
@@ -690,6 +756,8 @@ function renderFrame({
     while (lines.length < 2 + listBudget) lines.push('');
   }
 
+  for (const line of descriptionLines) lines.push(theme.dim(` ${line}`));
+
   if (menu.length) {
     for (const [index, item] of menu.entries()) {
       lines.push(completionRow(item, index === completionSelected, cols));
@@ -704,7 +772,7 @@ function renderFrame({
     placeholder: Boolean(allowInput && emptyQuery),
   }));
   lines.push(theme.dim(` ${footer}`));
-  const promptRow = 2 + listBudget + menuHeight + 2;
+  const promptRow = 2 + listBudget + descriptionLines.length + menuHeight + 2;
   const prefixCols = 2 + visLen('❯ ');
   const cursorCol = prefixCols + visLen(allowInput && !emptyQuery ? query : '');
   return {
@@ -807,14 +875,8 @@ async function pickFromList(screen, view) {
             return;
           }
           if (slash?.name === 'delete' && !slash.argument) {
-            const target = rows[selected]?.value;
-            if (!target) {
-              query = '/delete ';
-              draw();
-              return;
-            }
-            off();
-            resolve({ slash: { name: 'delete', argument: target }, selected: rows[selected] });
+            query = '/delete ';
+            draw();
             return;
           }
           off();
@@ -894,10 +956,10 @@ export async function pickDifficulty(screen, agentId, model) {
   const selected = await pickFromList(screen, {
     title: `${agentId} · add route`,
     meta: model,
-    rows: DIFFICULTY_KEYS.map((difficulty) => ({
-      title: DIFFICULTY_LABELS[difficulty],
-      meta: '',
-      value: difficulty,
+    rows: TASK_DIFFICULTIES.map((difficulty) => ({
+      title: difficulty.title,
+      description: difficulty.description,
+      value: difficulty.value,
     })),
     boxLabel: 'task difficulty',
     boxText: 'Choose the kind of task this route should handle.',
@@ -908,136 +970,58 @@ export async function pickDifficulty(screen, agentId, model) {
   return selected?.value;
 }
 
-export async function editRoutes(screen, baseOptions, agentId) {
-  let routes = [];
-  try {
-    const listed = await connectWorker({ ...baseOptions, listClis: true, verify: false });
-    const agent = listed.catalog.find((item) => item.id === agentId);
-    routes = routesFrom(agent ?? {});
-  } catch {
-    routes = [];
-  }
-
-  let status = 'Assign one model per task difficulty.';
-  let tone = 'accent';
-  for (;;) {
-    const selected = await pickFromList(screen, {
-      title: `${agentId} · routes`,
-      meta: DIFFICULTY_KEYS.map((key) => DIFFICULTY_LABELS[key]).join(' / '),
-      rows: routeRows(routes),
-      boxLabel: 'routes',
-      boxText: status,
-      boxTone: tone,
-      allowInput: true,
-      placeholder: '/add <model> <effort>',
-      footer: '↑/↓  ·  Enter select  ·  Tab complete  ·  /add  ·  /delete  ·  Esc',
-      usageAdd: 'Use /add <model> <effort>',
-      slash: {
-        commands: [
-          {
-            name: 'add',
-            hint: '<model> <effort>',
-            arguments: (head) => (head.length === 1 ? EFFORTS : []),
-            complete: (insert) => Boolean(parseRouteInput(parseSlashCommand(insert)?.argument)),
-          },
-          {
-            name: 'delete',
-            hint: '<easy|standard|hard|model>',
-            arguments: () => [
-              ...Object.keys(DIFFICULTY_INPUTS),
-              ...routes.map((route) => route.model).filter(Boolean),
-            ],
-          },
-        ],
+export async function pickModelAction(screen, route) {
+  const selected = await pickFromList(screen, {
+    title: `${route.model} · actions`,
+    meta: `${route.value} · ${taskDifficulty(route.difficulty).title}`,
+    rows: [
+      {
+        title: 'Verify',
+        detail: 'send a short connection check',
+        value: 'verify',
       },
-    });
-    if (!selected) return `Saved ${agentId} routes.`;
-    if (selected.error) {
-      status = selected.error;
-      tone = 'error';
-      continue;
-    }
-    if (selected.slash) {
-      if (selected.slash.unknown) {
-        status = `Unknown command /${selected.slash.name}`;
-        tone = 'error';
-        continue;
-      }
-      if (selected.slash.name === 'add') {
-        const routeInput = parseRouteInput(selected.slash.argument);
-        if (!routeInput) {
-          status = 'Usage: /add <model> <effort>';
-          tone = 'error';
-          continue;
-        }
-        const difficulty = await pickDifficulty(screen, agentId, routeInput.model);
-        if (!difficulty) {
-          status = 'Add cancelled.';
-          tone = 'accent';
-          continue;
-        }
-        const assignment = { ...routeInput, difficulty };
-        try {
-          await connectWorker({
-            ...baseOptions,
-            cli: agentId,
-            setRoute: assignment,
-            verify: false,
-          });
-        } catch (error) {
-          status = error instanceof Error ? error.message : String(error);
-          tone = 'error';
-          continue;
-        }
-        return `${agentId}  ${DIFFICULTY_LABELS[assignment.difficulty]} → ${assignment.model} · effort:${assignment.effort}`;
-      }
-      if (selected.slash.name === 'delete') {
-        const slot = DIFFICULTY_INPUTS[selected.slash.argument]
-          ?? (Object.hasOwn(DIFFICULTIES, selected.slash.argument)
-            ? selected.slash.argument
-            : routes.find((route) => route.model === selected.slash.argument)?.difficulty
-              ?? selected.selected?.value);
-        if (!slot) {
-          status = 'Usage: /delete <easy|standard|hard|model>';
-          tone = 'error';
-          continue;
-        }
-        try {
-          await connectWorker({
-            ...baseOptions,
-            cli: agentId,
-            clearRoute: slot,
-            verify: false,
-          });
-        } catch (error) {
-          status = error instanceof Error ? error.message : String(error);
-          tone = 'error';
-          continue;
-        }
-        routes = upsertRoute(routes, { difficulty: slot, clear: true });
-        status = `Cleared ${DIFFICULTY_LABELS[slot]}`;
-        tone = 'success';
-        continue;
-      }
-      status = `Unknown command /${selected.slash.name}`;
-      tone = 'error';
-      continue;
-    }
+      {
+        title: 'Delete route',
+        detail: 'remove this model route',
+        value: 'delete',
+      },
+      {
+        title: 'Back',
+        detail: 'return to models',
+        value: 'back',
+      },
+    ],
+    boxLabel: 'action',
+    boxText: 'Choose an action.',
+    boxTone: 'accent',
+    allowInput: false,
+    footer: '↑/↓  ·  Enter select  ·  Esc back',
+  });
+  return selected?.value ?? 'back';
+}
 
-    try {
-      await connectWorker({
-        ...baseOptions,
-        cli: agentId,
-        difficulty: selected.value,
-        verify: false,
-      });
-    } catch (error) {
-      status = error instanceof Error ? error.message : String(error);
-      tone = 'error';
-      continue;
-    }
-    return `${agentId}  difficulty → ${DIFFICULTY_LABELS[selected.value]}`;
+export function formatVerificationResult(route, verification) {
+  if (verification.verified) {
+    return `Verified ${route.model} (${route.value} · ${taskDifficulty(route.difficulty).title}).`;
   }
+  return `Verification failed for ${route.model}: ${verification.summary ?? 'Unknown error.'}`;
+}
+
+export async function showVerificationResult(screen, route, verification) {
+  await pickFromList(screen, {
+    title: `${route.model} · verification`,
+    meta: verification.verified ? 'success' : 'failed',
+    rows: [{
+      title: verification.verified ? 'Connected' : 'Connection failed',
+      description: verification.summary ?? '',
+      value: 'close',
+    }],
+    boxLabel: 'result',
+    boxText: formatVerificationResult(route, verification),
+    boxTone: verification.verified ? 'success' : 'error',
+    allowInput: false,
+    footer: 'Enter or Esc close',
+  });
 }
 
 function printOneShot(result) {
@@ -1045,7 +1029,7 @@ function printOneShot(result) {
     agent_id: result.agent_id,
     command: result.command,
     model: result.model,
-    difficulty: result.difficulty,
+    routes: result.routes,
     config: result.configPath,
     probe: result.probe?.status ?? null,
     ping: result.ping?.status ?? null,
@@ -1057,42 +1041,44 @@ function printOneShot(result) {
 async function runInteractiveLoop(baseOptions) {
   const screen = createScreen();
   screen.enter();
-  let boxText = 'Connect a worker, then pick a model.';
+  let boxText = 'Use /add <service> <model> <effort> to assign a route.';
   let boxTone = 'accent';
   try {
     for (;;) {
       const { catalog } = await connectWorker({ ...baseOptions, listClis: true, verify: false });
+      const rows = modelRows(catalog);
       const worker = await pickFromList(screen, {
         title: 'agent-broker · Connect',
         meta: `${catalog.length} worker${catalog.length === 1 ? '' : 's'}`,
-        rows: catalog.map((agent) => ({
-          title: agent.id,
-          detail: routeRows(routesFrom(agent))
-            .filter((row) => row.model)
-            .map((row) => `${row.title}:${row.model}`)
-            .join(' ') || 'no routes',
-          meta: displayPath(agent.command),
-          value: agent.id,
-        })),
+        rows,
         boxLabel: 'connect',
         boxText,
         boxTone,
         allowInput: true,
-        placeholder: '/add <service> <model> <effort>  ·  /delete <service>',
-        footer: '↑/↓  ·  Tab complete  ·  /add  ·  /delete  ·  Enter  ·  Esc quit',
+        placeholder: '/add <service> <model> <effort>  ·  /delete <service> <model> <effort>',
+        footer: '↑/↓  ·  Enter actions  ·  Tab complete  ·  /add  ·  /delete  ·  Esc quit',
         usageAdd: 'Use /add <service> <model> <effort>',
         slash: {
           commands: [
             {
               name: 'add',
               hint: '<service> <model> <effort>',
-              arguments: (head) => (head.length >= 2 ? EFFORTS : []),
               complete: (insert) => Boolean(parseWorkerRouteInput(parseSlashCommand(insert)?.argument)),
             },
             {
               name: 'delete',
-              hint: '<service>',
-              arguments: () => catalog.map((agent) => agent.id),
+              hint: '<service> <model> <effort>',
+              complete: (insert) => Boolean(parseWorkerRouteInput(parseSlashCommand(insert)?.argument)),
+              arguments: (head) => {
+                if (head.length === 0) return catalog.map((agent) => agent.id);
+                const agent = catalog.find((candidate) => candidate.id === head[0]);
+                const routes = routesFrom(agent);
+                if (head.length === 1) return [...new Set(routes.map((route) => route.model))];
+                const model = head.slice(1).join(' ');
+                return [...new Set(routes
+                  .filter((route) => route.model === model && route.effort)
+                  .map((route) => route.effort))];
+              },
             },
           ],
         },
@@ -1111,20 +1097,25 @@ async function runInteractiveLoop(baseOptions) {
           continue;
         }
         if (worker.slash.name === 'delete') {
-          const target = worker.slash.argument;
-          if (!target) {
-            boxText = 'Usage: /delete <service>';
+          const removal = parseWorkerRouteInput(worker.slash.argument);
+          if (!removal) {
+            boxText = 'Usage: /delete <service> <model> <effort>';
             boxTone = 'error';
             continue;
           }
           try {
-            await connectWorker({ ...baseOptions, cli: target, removeWorker: true, verify: false });
+            await connectWorker({
+              ...baseOptions,
+              cli: removal.service,
+              removeRoute: { model: removal.model, effort: removal.effort },
+              verify: false,
+            });
           } catch (error) {
             boxText = error instanceof Error ? error.message : String(error);
             boxTone = 'error';
             continue;
           }
-          boxText = `Removed ${target}`;
+          boxText = `Removed ${removal.service} ${removal.model} · effort:${removal.effort}`;
           boxTone = 'success';
           continue;
         }
@@ -1144,21 +1135,76 @@ async function runInteractiveLoop(baseOptions) {
       const registration = worker.slash?.name === 'add'
         ? parseWorkerRouteInput(worker.slash.argument)
         : undefined;
-      const token = registration?.service ?? worker.value;
-      let assignment;
-      if (registration) {
-        const difficulty = await pickDifficulty(screen, token, registration.model);
-        if (!difficulty) {
-          boxText = 'Add cancelled.';
+      if (!registration) {
+        if (!worker.model) {
+          boxText = `Use /add ${worker.value} <model> <effort>.`;
           boxTone = 'accent';
           continue;
         }
-        assignment = {
-          model: registration.model,
-          effort: registration.effort,
-          difficulty,
-        };
+        const action = await pickModelAction(screen, worker);
+        if (action === 'back') continue;
+        if (action === 'delete') {
+          try {
+            await connectWorker({
+              ...baseOptions,
+              cli: worker.value,
+              removeRoute: { model: worker.model, effort: worker.effort },
+              verify: false,
+            });
+          } catch (error) {
+            boxText = error instanceof Error ? error.message : String(error);
+            boxTone = 'error';
+            continue;
+          }
+          boxText = `Removed ${worker.value} ${worker.model}${worker.effort
+            ? ` · effort:${worker.effort}`
+            : ''}`;
+          boxTone = 'success';
+          continue;
+        }
+        let verification;
+        try {
+          verification = await withBusy(
+            screen,
+            `verifying ${worker.model}…`,
+            () => verifyWorker({
+              ...baseOptions,
+              agentId: worker.value,
+              difficulty: worker.difficulty,
+              model: worker.model,
+            }),
+            {
+              title: 'agent-broker · Verify',
+              meta: worker.model,
+              boxLabel: 'verify',
+              boxText: `Verifying ${worker.model}…`,
+              boxTone: 'accent',
+              footer: 'please wait',
+            },
+          );
+        } catch (error) {
+          verification = {
+            verified: false,
+            summary: error instanceof Error ? error.message : String(error),
+          };
+        }
+        await showVerificationResult(screen, worker, verification);
+        boxText = 'Choose a model or use a command.';
+        boxTone = 'accent';
+        continue;
       }
+      const token = registration.service;
+      const difficulty = await pickDifficulty(screen, token, registration.model);
+      if (!difficulty) {
+        boxText = 'Add cancelled.';
+        boxTone = 'accent';
+        continue;
+      }
+      const assignment = {
+        model: registration.model,
+        effort: registration.effort,
+        difficulty,
+      };
       let connected;
       try {
         connected = await withBusy(
@@ -1190,14 +1236,8 @@ async function runInteractiveLoop(baseOptions) {
         continue;
       }
 
-      if (assignment) {
-        boxText = `${connected.agent_id}  ${DIFFICULTY_LABELS[assignment.difficulty]} → ${assignment.model} · effort:${assignment.effort}`;
-        boxTone = 'success';
-        continue;
-      }
-
-      boxText = await editRoutes(screen, baseOptions, connected.agent_id);
-      boxTone = boxText.startsWith('Failed') ? 'error' : 'success';
+      boxText = `${connected.agent_id}  ${formatRouteAssignment(assignment)}`;
+      boxTone = 'success';
     }
   } finally {
     screen.leave();

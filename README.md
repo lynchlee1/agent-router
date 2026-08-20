@@ -20,9 +20,11 @@ cp config/agents.example.json config/agents.local.json
 npm run connect
 ```
 
-워커는 미리 정해 두지 않습니다. 저장소 루트에서 `npm run connect`를 실행하고 `/add <service> <model> <effort>`를 입력한 뒤 task difficulty를 선택해 `config/agents.local.json`에 추가합니다. 기존 워커의 route 화면에서는 `/add <model> <effort>`를 사용합니다. 모델 목록은 서비스별 명령으로 조회하지 않습니다. 모든 에이전트는 `billing.mode: "subscription"`과 `billing.fallback: "forbidden"`을 사용해야 하며, broker는 자격 증명을 저장하거나 종량제 API로 대체하지 않습니다. 이 파일은 Git에 추가하지 마세요.
+워커는 미리 정해 두지 않습니다. 저장소 루트에서 `npm run connect`를 실행하고 `/add <service> <model> <effort>`를 입력한 뒤 task difficulty를 선택해 `config/agents.local.json`에 route를 추가합니다. 기존 워커의 route를 추가하거나 변경할 때도 같은 명령을 사용합니다. 모델 목록은 서비스별 명령으로 조회하지 않습니다. 모든 에이전트는 `billing.mode: "subscription"`과 `billing.fallback: "forbidden"`을 사용해야 하며, broker는 자격 증명을 저장하거나 종량제 API로 대체하지 않습니다. 이 파일은 Git에 추가하지 마세요.
 
-Task difficulty는 문제 자체의 난이도이고, `effort`는 선택된 모델의 추론 노력 수준입니다. 두 값은 서로 독립적입니다.
+메인 화면에는 등록된 route가 모델별로 표시됩니다. 모델을 선택하고 Enter를 누르면 action 메뉴가 열립니다. `Verify`는 해당 route로 짧은 검증 프롬프트를 보내고 결과 화면을 표시합니다. Enter 또는 Esc로 결과 화면만 닫고 메인 모델 목록으로 돌아가며, 설정 파일은 변경하지 않습니다.
+
+Task difficulty는 문제 자체의 난이도이고, `effort`는 선택된 모델의 추론 노력 수준입니다. 두 값은 서로 독립적이며, difficulty를 생략하면 `standard_task`로 처리합니다.
 
 | 내부 값 | UI 표시 | 기준 |
 | --- | --- | --- |
@@ -30,7 +32,9 @@ Task difficulty는 문제 자체의 난이도이고, `effort`는 선택된 모�
 | `standard_task` | Standard task | 조사, 여러 파일 수정, 일반적인 디버깅 작업(기본값) |
 | `hard_task` | Hard task | 아키텍처, 보안, 파괴적 위험, 어려운 디버깅, 최종 리뷰 |
 
-기존 설정의 difficulty 값은 `low` → `easy_task`, `medium` → `standard_task`, `high` → `hard_task`로 바꿔야 합니다. `effort`의 `low`, `medium`, `high` 값은 바꾸지 않습니다.
+난이도는 각 route의 `difficulty`에만 기록합니다. 워커 자체의 속성인 `roles`, `priority`, `scarcity`, `max_concurrency`와 모델의 `effort`는 난이도와 별개입니다.
+
+이전의 워커 최상위 `difficulty`와 `--difficulty` CLI 옵션은 지원하지 않습니다. 기존 로컬 설정은 최상위 값을 제거하고 TUI에서 route를 다시 지정해야 합니다.
 
 ```bash
 codex mcp add agent-broker -- node /absolute/path/to/agent-router/bin/agent-broker.js --config /absolute/path/to/agent-router/config/agents.local.json

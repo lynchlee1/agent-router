@@ -10,61 +10,26 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import {
+  normalizeTaskDifficulty,
+  TASK_DIFFICULTY_VALUES,
+} from './task-difficulty.js';
+
+export {
+  DEFAULT_TASK_DIFFICULTY,
+  normalizeTaskDifficulty,
+  TASK_DIFFICULTIES,
+  TASK_DIFFICULTY_VALUES,
+  taskDifficulty,
+  taskDifficultyFromCommand,
+} from './task-difficulty.js';
+
 const API_KEY_NAME = /_API_KEY$/i;
 const TEMPLATE_VALUES = new Set(['{{prompt}}', '{{session_id}}', '{{cwd}}']);
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const PROBE_TIMEOUT_MS = 5 * 1000;
 const MAX_CAPTURE_BYTES = 1024 * 1024;
 const BROKER_DEPTH_NAME = 'AGENT_BROKER_DEPTH';
-
-export const DIFFICULTY_KEYS = Object.freeze(['easy_task', 'standard_task', 'hard_task']);
-
-export const DIFFICULTY_LABELS = Object.freeze({
-  easy_task: 'Easy task',
-  standard_task: 'Standard task',
-  hard_task: 'Hard task',
-});
-
-export const DIFFICULTIES = {
-  easy_task: {
-    scarcity: 'abundant',
-    priority: 30,
-    max_concurrency: 2,
-    roles: ['explore', 'implement', 'test'],
-  },
-  standard_task: {
-    scarcity: 'normal',
-    priority: 20,
-    max_concurrency: 2,
-    roles: ['explore', 'implement', 'test', 'debug'],
-  },
-  hard_task: {
-    scarcity: 'scarce',
-    priority: 10,
-    max_concurrency: 1,
-    roles: ['architecture', 'debug', 'review'],
-  },
-};
-
-export function normalizeDifficulty(value) {
-  if (value === undefined || value === '') return 'standard_task';
-  if (!Object.hasOwn(DIFFICULTIES, value)) {
-    throw new TypeError(`difficulty must be one of: ${DIFFICULTY_KEYS.join(', ')}.`);
-  }
-  return value;
-}
-
-export function applyDifficulty(agent, difficulty) {
-  const key = normalizeDifficulty(difficulty);
-  return { ...agent, difficulty: key, ...DIFFICULTIES[key] };
-}
-
-function difficultyFrom(rawAgent) {
-  if (rawAgent.difficulty) return normalizeDifficulty(rawAgent.difficulty);
-  if (rawAgent.scarcity === 'abundant') return 'easy_task';
-  if (rawAgent.scarcity === 'scarce') return 'hard_task';
-  return 'standard_task';
-}
 
 function modelFromArgs(args = []) {
   const index = args.indexOf('--model');
@@ -76,7 +41,9 @@ function normalizeRouteList(routes) {
   const byDifficulty = new Map();
   for (const route of routes) {
     if (!route || typeof route !== 'object' || Array.isArray(route)) continue;
-    if (!Object.hasOwn(DIFFICULTIES, route.difficulty)) continue;
+    if (!TASK_DIFFICULTY_VALUES.includes(route.difficulty)) {
+      throw new TypeError(`route difficulty must be one of: ${TASK_DIFFICULTY_VALUES.join(', ')}.`);
+    }
     if (typeof route.model !== 'string' || !route.model.trim()) continue;
     byDifficulty.set(route.difficulty, {
       difficulty: route.difficulty,
@@ -86,19 +53,15 @@ function normalizeRouteList(routes) {
         : {}),
     });
   }
-  return DIFFICULTY_KEYS.map((difficulty) => byDifficulty.get(difficulty)).filter(Boolean);
+  return TASK_DIFFICULTY_VALUES.map((difficulty) => byDifficulty.get(difficulty)).filter(Boolean);
 }
 
 export function routesFrom(agent) {
-  const explicit = normalizeRouteList(agent.routes);
-  if (explicit.length) return explicit;
-  const model = typeof agent.model === 'string' && agent.model ? agent.model : modelFromArgs(agent.args);
-  if (!model) return [];
-  return [{ difficulty: agent.difficulty ?? 'standard_task', model }];
+  return normalizeRouteList(agent.routes);
 }
 
 export function upsertRoute(routes, { difficulty, model, effort, clear = false } = {}) {
-  const key = normalizeDifficulty(difficulty);
+  const key = normalizeTaskDifficulty(difficulty);
   const byDifficulty = new Map(normalizeRouteList(routes).map((route) => [route.difficulty, route]));
   if (clear) byDifficulty.delete(key);
   else if (typeof model === 'string' && model.trim()) {
@@ -108,7 +71,7 @@ export function upsertRoute(routes, { difficulty, model, effort, clear = false }
       ...(typeof effort === 'string' && effort.trim() ? { effort: effort.trim() } : {}),
     });
   }
-  return DIFFICULTY_KEYS.map((item) => byDifficulty.get(item)).filter(Boolean);
+  return TASK_DIFFICULTY_VALUES.map((item) => byDifficulty.get(item)).filter(Boolean);
 }
 
 export function modelForDifficulty(agent, difficulty) {
@@ -127,8 +90,7 @@ export function effortForDifficulty(agent, difficulty) {
 function agentHandlesDifficulty(agent, difficulty) {
   if (agent.model || modelFromArgs(agent.args)) return true;
   const routes = routesFrom(agent);
-  if (routes.length) return routes.some((route) => route.difficulty === difficulty);
-  return (agent.difficulty ?? 'standard_task') === difficulty;
+  return !routes.length || routes.some((route) => route.difficulty === difficulty);
 }
 
 function withModelFlag(args, model) {
@@ -196,6 +158,9 @@ function normalizeAgent(rawAgent, seenIds, configDir) {
     throw new TypeError(`Duplicate agent id: ${id}`);
   }
   seenIds.add(id);
+  if (rawAgent.difficulty !== undefined) {
+    throw new TypeError(`Agent ${id} difficulty must be configured on routes.`);
+  }
 
   const billing = rawAgent.billing;
   if (!billing || billing.mode !== 'subscription' || billing.fallback !== 'forbidden') {
@@ -272,7 +237,6 @@ function normalizeAgent(rawAgent, seenIds, configDir) {
     continuation: rawAgent.continuation === true,
     priority: Number.isFinite(rawAgent.priority) ? rawAgent.priority : 100,
     max_concurrency: normalizePositiveInteger(rawAgent.max_concurrency, 1, `Agent ${id} max_concurrency`),
-    difficulty: difficultyFrom(rawAgent),
     routes: routesFrom({ ...rawAgent, args }),
     timeout_ms: normalizeTimeout(rawAgent.timeout_ms, undefined),
     adapter_module: rawAgent.adapter_module
@@ -369,7 +333,6 @@ export class AgentBroker {
           scarcity: agent.scarcity,
           quota_hint: agent.quota_hint,
           models: agent.models,
-          difficulty: agent.difficulty,
           routes: agent.routes,
           continuation: supportsContinuation(agent),
         };
@@ -400,7 +363,7 @@ export class AgentBroker {
         continue;
       }
 
-      const difficulty = input.difficulty === undefined ? undefined : normalizeDifficulty(input.difficulty);
+      const difficulty = normalizeTaskDifficulty(input.difficulty);
       const result = await this.#runAgent(agent, {
         task,
         cwd: normalizeCwd(input.cwd),
@@ -478,10 +441,10 @@ export class AgentBroker {
       candidates = input.agent_ids.map((id) => byId.get(id)).filter(Boolean);
       if (candidates.length !== input.agent_ids.length) return [];
     } else {
-      const difficulty = input.difficulty === undefined ? undefined : normalizeDifficulty(input.difficulty);
+      const difficulty = normalizeTaskDifficulty(input.difficulty);
       candidates = this.config.agents
         .filter((agent) => !input.role || agent.roles.includes(input.role))
-        .filter((agent) => !difficulty || agentHandlesDifficulty(agent, difficulty))
+        .filter((agent) => agentHandlesDifficulty(agent, difficulty))
         .sort((left, right) => left.priority - right.priority);
     }
 

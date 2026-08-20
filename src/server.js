@@ -3,6 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 
 import { AgentBroker } from './index.js';
+import { TASK_DIFFICULTY_VALUES } from './task-difficulty.js';
 
 export function createServer(broker) {
   const server = new McpServer({ name: 'agent-broker', version: '0.1.0' });
@@ -26,7 +27,7 @@ export function createServer(broker) {
         task: z.string().min(1),
         cwd: z.string().min(1).optional(),
         role: z.string().min(1).optional(),
-        difficulty: z.enum(['easy_task', 'standard_task', 'hard_task']).optional(),
+        difficulty: z.enum(TASK_DIFFICULTY_VALUES).optional(),
         agent_ids: z.array(z.string().min(1)).min(1).optional(),
         retry_safe: z.boolean().optional(),
         timeout_ms: z.number().int().positive().max(3_600_000).optional(),

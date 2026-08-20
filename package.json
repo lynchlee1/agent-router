@@ -11,7 +11,7 @@
     "start": "node bin/agent-broker.js",
     "connect": "node bin/connect-worker.js",
     "test": "node --test",
-    "check": "node --check bin/agent-broker.js && node --check bin/connect-worker.js && node --check src/index.js && node --check src/server.js"
+    "check": "node --check bin/agent-broker.js && node --check bin/connect-worker.js && node --check src/index.js && node --check src/server.js && node --check src/task-difficulty.js"
   },
   "engines": {
     "node": ">=20"

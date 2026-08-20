@@ -224,6 +224,23 @@ contractTest('loadConfig rejects resume arguments without a whole session-id pla
   assert.throws(() => loadConfig(configPath), /resume_args|session_id/i);
 });
 
+contractTest('loadConfig accepts difficulty only on routes', async (t) => {
+  const sandbox = await makeSandbox(t);
+  const agent = fakeAgent({ id: 'worker', logPath: sandbox.logPath });
+
+  assert.throws(
+    () => loadConfig(configFor(sandbox, [{ ...agent, difficulty: 'hard_task' }])),
+    /difficulty must be configured on routes/i,
+  );
+  assert.throws(
+    () => loadConfig(configFor(sandbox, [{
+      ...agent,
+      routes: [{ difficulty: 'high', model: 'strong' }],
+    }])),
+    /route difficulty must be one of/i,
+  );
+});
+
 contractTest('discovery probes enabled agents and reports unavailable and disabled states', async (t) => {
   const sandbox = await makeSandbox(t);
   const broker = new AgentBroker(
@@ -284,6 +301,30 @@ contractTest('delegate injects the route model for a difficulty', async (t) => {
   assert.equal(run.argv[run.argv.indexOf('--model') + 1], 'strong');
 });
 
+contractTest('delegate defaults omitted difficulty to the standard task route', async (t) => {
+  const sandbox = await makeSandbox(t);
+  const broker = new AgentBroker(
+    configFor(sandbox, [
+      {
+        ...fakeAgent({ id: 'multi', logPath: sandbox.logPath }),
+        routes: [
+          { difficulty: 'easy_task', model: 'fast' },
+          { difficulty: 'standard_task', model: 'balanced' },
+        ],
+      },
+    ]),
+  );
+
+  const result = await broker.delegate({
+    task: 'routine work',
+    cwd: sandbox.directory,
+  });
+
+  assert.equal(result.status, 'completed');
+  const run = (await events(sandbox.logPath)).find((event) => event.kind === 'run');
+  assert.equal(run.argv[run.argv.indexOf('--model') + 1], 'balanced');
+});
+
 contractTest('delegate uses a default model when no route matches', async (t) => {
   const sandbox = await makeSandbox(t);
   const broker = new AgentBroker(
@@ -310,8 +351,14 @@ contractTest('delegate with difficulty only uses matching workers', async (t) =>
   const sandbox = await makeSandbox(t);
   const broker = new AgentBroker(
     configFor(sandbox, [
-      { ...fakeAgent({ id: 'easy', logPath: sandbox.logPath }), difficulty: 'easy_task' },
-      { ...fakeAgent({ id: 'hard', logPath: sandbox.logPath }), difficulty: 'hard_task' },
+      {
+        ...fakeAgent({ id: 'easy', logPath: sandbox.logPath }),
+        routes: [{ difficulty: 'easy_task', model: 'fast' }],
+      },
+      {
+        ...fakeAgent({ id: 'hard', logPath: sandbox.logPath }),
+        routes: [{ difficulty: 'hard_task', model: 'strong' }],
+      },
     ]),
   );
 

@@ -18,6 +18,12 @@ const brokerApi = sourceReady
   ? await import(pathToFileURL(sourcePath).href)
   : null;
 const { loadConfig, AgentBroker, internals } = brokerApi ?? {};
+let workstreamSequence = 0;
+
+function nextWorkstreamId(label = 'contract') {
+  workstreamSequence += 1;
+  return `${label}-${workstreamSequence}`;
+}
 
 function contractTest(name, fn) {
   return test(
@@ -326,6 +332,7 @@ contractTest('delegate injects the route model for a difficulty', async (t) => {
   );
 
   const result = await broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'hard work',
     cwd: sandbox.directory,
     difficulty: 'hard_task',
@@ -350,6 +357,7 @@ contractTest('delegate defaults omitted difficulty to the standard task route', 
   );
 
   const result = await broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'routine work',
     cwd: sandbox.directory,
   });
@@ -372,6 +380,7 @@ contractTest('delegate uses a default model when no route matches', async (t) =>
   );
 
   const result = await broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'hard work',
     cwd: sandbox.directory,
     difficulty: 'hard_task',
@@ -397,6 +406,7 @@ contractTest('delegate with difficulty only uses matching workers', async (t) =>
   );
 
   const result = await broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'hard work',
     cwd: sandbox.directory,
     difficulty: 'hard_task',
@@ -429,6 +439,7 @@ contractTest('codex-exec isolates user config and marks the worker as a delegati
   );
 
   const result = await broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'review the design',
     cwd: sandbox.directory,
     difficulty: 'hard_task',
@@ -466,6 +477,7 @@ contractTest('a broker started inside a worker rejects recursive delegation', as
   }
 
   const result = await broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'do not delegate again',
     cwd: sandbox.directory,
   });
@@ -494,6 +506,7 @@ contractTest('retry-safe work falls back from quota exhaustion to the next prior
   );
 
   const result = await broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'safe retry task',
     cwd: sandbox.directory,
     agent_ids: ['priority-quota', 'priority-backup'],
@@ -526,6 +539,7 @@ contractTest('quota exhaustion never falls back when the work is not retry-safe'
   );
 
   const result = await broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'non-idempotent task',
     cwd: sandbox.directory,
     agent_ids: ['quota-only', 'must-not-run'],
@@ -549,6 +563,7 @@ contractTest('a plain-text (non-JSON) stdout becomes the summary instead of a ge
   );
 
   const result = await broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'summarize the repo',
     cwd: sandbox.directory,
     agent_ids: ['plain-text-agent'],
@@ -573,6 +588,7 @@ contractTest('a failed authentication preflight never sends the task and may saf
   );
 
   const result = await broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'do not send this to an unauthenticated CLI',
     cwd: sandbox.directory,
     agent_ids: ['needs-login', 'preflight-backup'],
@@ -608,12 +624,37 @@ contractTest('dispatch rejects a mutated non-subscription agent before spawning 
   };
 
   const result = await broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'this must never reach a CLI',
     cwd: sandbox.directory,
     agent_ids: ['policy-guard'],
   });
 
   assert.equal(result.status, 'policy_rejected');
+  assert.deepEqual(await events(sandbox.logPath), []);
+});
+
+contractTest('delegate requires a workstream id before probing or spawning', async (t) => {
+  const sandbox = await makeSandbox(t);
+  const broker = new AgentBroker(
+    configFor(sandbox, [
+      fakeAgent({ id: 'workstream-required', logPath: sandbox.logPath }),
+    ]),
+  );
+
+  const missing = await broker.delegate({
+    task: 'must not launch',
+    cwd: sandbox.directory,
+  });
+  const blank = await broker.delegate({
+    workstream_id: '   ',
+    task: 'must not launch either',
+    cwd: sandbox.directory,
+  });
+
+  assert.equal(missing.status, 'invalid_request');
+  assert.equal(blank.status, 'invalid_request');
+  assert.match(missing.summary, /workstream_id/i);
   assert.deepEqual(await events(sandbox.logPath), []);
 });
 
@@ -631,6 +672,7 @@ contractTest('an agent at its concurrency limit is reported as busy without anot
   );
 
   const first = broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'long task',
     cwd: sandbox.directory,
     agent_ids: ['single-flight'],
@@ -640,6 +682,7 @@ contractTest('an agent at its concurrency limit is reported as busy without anot
     (event) => event.kind === 'run' && event.label === 'single-flight',
   );
   const second = await broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'overlapping task',
     cwd: sandbox.directory,
     agent_ids: ['single-flight'],
@@ -649,6 +692,88 @@ contractTest('an agent at its concurrency limit is reported as busy without anot
   assert.equal(second.status, 'busy');
   assert.equal(second.agent_id, 'single-flight');
   assert.equal(firstResult.status, 'completed');
+  const runs = (await events(sandbox.logPath)).filter(
+    (event) => event.kind === 'run',
+  );
+  assert.equal(runs.length, 1);
+});
+
+contractTest('the same pending workstream cannot spawn twice', async (t) => {
+  const sandbox = await makeSandbox(t);
+  const broker = new AgentBroker(
+    configFor(sandbox, [
+      fakeAgent({
+        id: 'pending-workstream',
+        logPath: sandbox.logPath,
+        delayMs: 150,
+        maxConcurrency: 2,
+      }),
+    ]),
+  );
+
+  const first = broker.delegate({
+    workstream_id: 'one-at-a-time',
+    task: 'long workstream task',
+    cwd: sandbox.directory,
+  });
+  await waitForEvent(
+    sandbox.logPath,
+    (event) => event.kind === 'run' && event.label === 'pending-workstream',
+  );
+  const duplicate = await broker.delegate({
+    workstream_id: 'one-at-a-time',
+    task: 'duplicate workstream task',
+    cwd: sandbox.directory,
+  });
+  const firstResult = await first;
+
+  assert.equal(duplicate.status, 'busy');
+  assert.equal(duplicate.workstream_id, 'one-at-a-time');
+  assert.equal(firstResult.status, 'completed');
+  const runs = (await events(sandbox.logPath)).filter(
+    (event) => event.kind === 'run',
+  );
+  assert.equal(runs.length, 1);
+});
+
+contractTest('a bound workstream requires continuation across broker restarts', async (t) => {
+  const sandbox = await makeSandbox(t);
+  const config = configFor(sandbox, [
+    fakeAgent({
+      id: 'bound-workstream',
+      logPath: sandbox.logPath,
+      nativeSessionId: 'native-bound',
+      resume: true,
+    }),
+  ]);
+  const broker = new AgentBroker(config);
+  const initial = await broker.delegate({
+    workstream_id: 'durable-bound-workstream',
+    task: 'start durable work',
+    cwd: sandbox.directory,
+  });
+
+  const duplicate = await broker.delegate({
+    workstream_id: ' durable-bound-workstream ',
+    task: 'must not start a second session',
+    cwd: sandbox.directory,
+  });
+  const restartedBroker = new AgentBroker(config);
+  const duplicateAfterRestart = await restartedBroker.delegate({
+    workstream_id: 'durable-bound-workstream',
+    task: 'must still not start a second session',
+    cwd: sandbox.directory,
+  });
+
+  assert.equal(initial.status, 'completed');
+  assert.equal(initial.workstream_id, 'durable-bound-workstream');
+  assert.ok(initial.session_id);
+  for (const result of [duplicate, duplicateAfterRestart]) {
+    assert.equal(result.status, 'continuation_required');
+    assert.equal(result.workstream_id, 'durable-bound-workstream');
+    assert.equal(result.session_id, initial.session_id);
+    assert.equal(result.agent_id, 'bound-workstream');
+  }
   const runs = (await events(sandbox.logPath)).filter(
     (event) => event.kind === 'run',
   );
@@ -669,12 +794,14 @@ contractTest('a native CLI session is mapped and continued through its configure
   );
 
   const initial = await broker.delegate({
+    workstream_id: 'session-workstream',
     task: 'start a native session',
     cwd: sandbox.directory,
     agent_ids: ['session-agent'],
   });
   assert.equal(initial.status, 'completed');
   assert.equal(initial.agent_id, 'session-agent');
+  assert.equal(initial.workstream_id, 'session-workstream');
   assert.ok(initial.session_id);
   assert.notEqual(initial.session_id, 'native-1');
 
@@ -686,6 +813,7 @@ contractTest('a native CLI session is mapped and continued through its configure
   assert.equal(continuation.status, 'completed');
   assert.equal(continuation.agent_id, 'session-agent');
   assert.equal(continuation.session_id, initial.session_id);
+  assert.equal(continuation.workstream_id, 'session-workstream');
   assert.match(continuation.summary, /follow-up request/);
 
   const resume = await waitForEvent(
@@ -706,6 +834,7 @@ contractTest('a persisted session refuses continuation when its agent adapter ch
   });
   const initialBroker = new AgentBroker(configFor(sandbox, [originalAgent]));
   const initial = await initialBroker.delegate({
+    workstream_id: 'durable-workstream',
     task: 'create a durable session',
     cwd: sandbox.directory,
     agent_ids: ['stable-agent'],
@@ -751,6 +880,7 @@ contractTest('a per-call timeout terminates the native CLI and reports timeout',
   );
 
   const result = await broker.delegate({
+    workstream_id: nextWorkstreamId(),
     task: 'must time out',
     cwd: sandbox.directory,
     agent_ids: ['slow-agent'],
@@ -783,6 +913,7 @@ contractTest('native subprocesses do not receive inherited API-key environment v
       ]),
     );
     const result = await broker.delegate({
+      workstream_id: nextWorkstreamId(),
       task: 'verify child environment',
       cwd: sandbox.directory,
       agent_ids: ['sanitized'],
@@ -848,6 +979,8 @@ mcpTest('the stdio MCP server exposes and serves the list_agents tool', async (t
   await client.connect(transport);
   const listed = await client.listTools();
   assert.ok(listed.tools.some((tool) => tool.name === 'list_agents'));
+  const delegateTool = listed.tools.find((tool) => tool.name === 'delegate');
+  assert.ok(delegateTool.inputSchema.required.includes('workstream_id'));
 
   const result = await client.callTool({
     name: 'list_agents',

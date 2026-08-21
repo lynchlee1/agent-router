@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { randomUUID } from 'node:crypto';
 import { accessSync, constants, openSync, readFileSync, writeFileSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, delimiter, isAbsolute, join, resolve } from 'node:path';
@@ -447,6 +448,7 @@ export async function connectWorker(options) {
     return result;
   }
   const ping = await broker.delegate({
+    workstream_id: `connect-verification-${randomUUID()}`,
     task: `Reply with exactly: ${configured.id}-ok. Do not use tools. Do not edit files.`,
     agent_ids: [configured.id],
     cwd: repoRoot,
@@ -481,6 +483,7 @@ export async function verifyWorker(options) {
   }
 
   const ping = await broker.delegate({
+    workstream_id: `connect-verification-${randomUUID()}`,
     task: 'Reply exactly: OK',
     agent_ids: [options.agentId],
     difficulty: options.difficulty,

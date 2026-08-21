@@ -32,6 +32,7 @@ npm run register
 ```text
 list_agents({ refresh: true })
 delegate({
+  workstream_id: "repository-plan",
   task: "Explore the repository and report the smallest safe implementation plan.",
   difficulty: "easy_task",
   retry_safe: true,
@@ -39,6 +40,11 @@ delegate({
 })
 continue({ session_id: "broker-session-id", task: "Run the focused tests and summarize failures." })
 ```
+
+`workstream_id`는 새 작업 흐름마다 고유해야 합니다. 성공한 위임으로 세션이
+연결된 뒤 같은 ID로 `delegate`를 다시 호출하면 새 에이전트를 실행하지 않고
+`continuation_required`와 기존 `session_id`를 반환합니다. 후속 작업은 해당
+`session_id`로 `continue`를 호출하세요.
 
 ## 검증
 

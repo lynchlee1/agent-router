@@ -314,6 +314,8 @@ export class AgentBroker {
     this.sessionFile = join(this.config.state_dir, 'sessions.json');
     mkdirSync(this.logDir, { recursive: true });
     this.sessions = this.#readSessions();
+    this.workstreams = workstreamIndex(this.sessions);
+    this.pendingWorkstreams = new Set();
   }
 
   async listAgents({ refresh = false } = {}) {
@@ -343,43 +345,72 @@ export class AgentBroker {
 
   async delegate(input = {}) {
     const task = validateTask(input.task);
+    const workstreamId = normalizeWorkstreamId(input.workstream_id);
+    if (!workstreamId) {
+      return failure('invalid_request', 'delegate requires a non-empty workstream_id.');
+    }
     if (this.delegationDepth > 0) {
       return failure('policy_rejected', 'Recursive delegation from a broker worker is disabled.');
     }
-    const candidates = this.#selectCandidates(input);
-    if (!candidates.length) {
-      return failure('no_eligible_agent', 'No enabled subscription agent matches this delegation.');
+    const existingSessionId = this.workstreams.get(workstreamId);
+    if (existingSessionId) {
+      const saved = this.sessions[existingSessionId];
+      return {
+        status: 'continuation_required',
+        workstream_id: workstreamId,
+        session_id: existingSessionId,
+        ...(saved?.agent_id ? { agent_id: saved.agent_id } : {}),
+        summary: `Workstream ${workstreamId} already has session ${existingSessionId}; call continue with that session_id.`,
+      };
+    }
+    if (this.pendingWorkstreams.has(workstreamId)) {
+      return {
+        status: 'busy',
+        workstream_id: workstreamId,
+        summary: `Workstream ${workstreamId} is already being delegated.`,
+      };
     }
 
-    let lastResult;
-    for (const agent of candidates) {
-      if ((this.active.get(agent.id) ?? 0) >= agent.max_concurrency) {
-        lastResult = failure('busy', `${agent.id} is at its concurrency limit.`, agent.id);
-        continue;
-      }
-      const readiness = await this.#probe(agent);
-      if (readiness.status !== 'available') {
-        lastResult = failure(readiness.failure_kind ?? readiness.status, readiness.reason, agent.id);
-        continue;
+    this.pendingWorkstreams.add(workstreamId);
+    try {
+      const candidates = this.#selectCandidates(input);
+      if (!candidates.length) {
+        return failure('no_eligible_agent', 'No enabled subscription agent matches this delegation.');
       }
 
-      const difficulty = normalizeTaskDifficulty(input.difficulty);
-      const result = await this.#runAgent(agent, {
-        task,
-        cwd: normalizeCwd(input.cwd),
-        timeout_ms: normalizeTimeout(input.timeout_ms, agent.timeout_ms ?? this.config.timeout_ms),
-        kind: 'delegate',
-        difficulty,
-        model: modelForDifficulty(agent, difficulty),
-        effort: effortForDifficulty(agent, difficulty),
-      });
-      lastResult = result;
+      let lastResult;
+      for (const agent of candidates) {
+        if ((this.active.get(agent.id) ?? 0) >= agent.max_concurrency) {
+          lastResult = failure('busy', `${agent.id} is at its concurrency limit.`, agent.id);
+          continue;
+        }
+        const readiness = await this.#probe(agent);
+        if (readiness.status !== 'available') {
+          lastResult = failure(readiness.failure_kind ?? readiness.status, readiness.reason, agent.id);
+          continue;
+        }
 
-      if (result.status === 'completed') return result;
-      if (result.status !== 'quota_exhausted' || input.retry_safe !== true) return result;
+        const difficulty = normalizeTaskDifficulty(input.difficulty);
+        const result = await this.#runAgent(agent, {
+          task,
+          workstream_id: workstreamId,
+          cwd: normalizeCwd(input.cwd),
+          timeout_ms: normalizeTimeout(input.timeout_ms, agent.timeout_ms ?? this.config.timeout_ms),
+          kind: 'delegate',
+          difficulty,
+          model: modelForDifficulty(agent, difficulty),
+          effort: effortForDifficulty(agent, difficulty),
+        });
+        lastResult = result;
+
+        if (result.status === 'completed') return result;
+        if (result.status !== 'quota_exhausted' || input.retry_safe !== true) return result;
+      }
+
+      return lastResult ?? failure('no_eligible_agent', 'No usable subscription agent is available.');
+    } finally {
+      this.pendingWorkstreams.delete(workstreamId);
     }
-
-    return lastResult ?? failure('no_eligible_agent', 'No usable subscription agent is available.');
   }
 
   async continue(input = {}) {
@@ -426,7 +457,11 @@ export class AgentBroker {
         updated_at: new Date().toISOString(),
       };
       this.#writeSessions();
-      return { ...result, session_id: sessionId };
+      return {
+        ...result,
+        session_id: sessionId,
+        ...(saved.workstream_id ? { workstream_id: saved.workstream_id } : {}),
+      };
     }
     return result;
   }
@@ -523,6 +558,7 @@ export class AgentBroker {
         status,
         agent_id: agent.id,
         summary: outcome.summary ?? conciseReason(parsed, outcome, status),
+        ...(request.workstream_id ? { workstream_id: request.workstream_id } : {}),
         ...(nativeSessionId ? { native_session_id: nativeSessionId } : {}),
       };
       const logPath = this.#writeLog({ agent, request, outcome, result, startedAt });
@@ -537,9 +573,11 @@ export class AgentBroker {
           native_session_id: nativeSessionId,
           cwd: request.cwd,
           effort: request.effort,
+          workstream_id: request.workstream_id,
           created_at: startedAt,
           updated_at: new Date().toISOString(),
         };
+        this.workstreams.set(request.workstream_id, sessionId);
         this.#writeSessions();
         result.session_id = sessionId;
       }
@@ -604,6 +642,7 @@ export class AgentBroker {
       finished_at: new Date().toISOString(),
       agent_id: agent.id,
       kind: request.kind,
+      workstream_id: request.workstream_id,
       cwd: request.cwd,
       result,
       process: {
@@ -830,6 +869,24 @@ function normalizeCwd(cwd) {
   if (cwd === undefined) return process.cwd();
   if (typeof cwd !== 'string' || !cwd) throw new TypeError('cwd must be a non-empty path.');
   return resolve(cwd);
+}
+
+function normalizeWorkstreamId(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function workstreamIndex(sessions) {
+  const index = new Map();
+  const records = Object.entries(sessions).sort(([leftId, left], [rightId, right]) => {
+    const leftTime = Date.parse(left?.updated_at ?? left?.created_at ?? '') || 0;
+    const rightTime = Date.parse(right?.updated_at ?? right?.created_at ?? '') || 0;
+    return leftTime - rightTime || leftId.localeCompare(rightId);
+  });
+  for (const [sessionId, session] of records) {
+    const workstreamId = normalizeWorkstreamId(session?.workstream_id);
+    if (workstreamId) index.set(workstreamId, sessionId);
+  }
+  return index;
 }
 
 function supportsContinuation(agent) {

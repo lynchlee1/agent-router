@@ -22,8 +22,9 @@ export function createServer(broker) {
     'delegate',
     {
       title: 'Delegate bounded coding work',
-      description: 'Run a task through subscription-backed native CLI agents, optionally routed by task difficulty.',
+      description: 'Run a new workstream through subscription-backed native CLI agents. A bound workstream returns continuation_required without spawning.',
       inputSchema: {
+        workstream_id: z.string().trim().min(1),
         task: z.string().min(1),
         cwd: z.string().min(1).optional(),
         role: z.string().min(1).optional(),

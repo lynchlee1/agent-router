@@ -21,8 +21,7 @@ or `delegate` merely to classify such a task.
 
 Delegate only when the worker has an independent scope, a clear done condition,
 and delegation provides a concrete benefit such as parallel investigation or an
-isolated multi-file workstream. Call `delegate({ difficulty, task })` before the
-root starts that delegated work. An `easy_task` should be delegated only when the
+isolated multi-file workstream. An `easy_task` should be delegated only when the
 user explicitly requests delegation or it is an independent part of a larger
 task; difficulty alone does not make a task eligible for delegation.
 
@@ -38,6 +37,10 @@ Constraints and non-goals:
 Deliverable and evidence:
 Done when:
 ```
+
+Give every new delegated workstream a stable, unique `workstream_id` and call
+`delegate({ workstream_id, difficulty, task })`. Reusing a bound workstream id
+returns `continuation_required` without starting another agent.
 
 The root agent integrates and verifies results. Preserve the `session_id` returned
 by `delegate`. Use `continue({ session_id, task })` for every follow-up in the same
